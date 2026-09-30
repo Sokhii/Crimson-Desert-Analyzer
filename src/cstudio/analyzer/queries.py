@@ -6,6 +6,7 @@ these functions, so they always see the same facts.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from cstudio.db.database import Database, loads
@@ -119,8 +120,18 @@ def media_summary_rows(db: Database, inst_id: int, query: str = "", role: str = 
         else:
             sql += " AND c.role=?"
             params.append(role)
+    q = query.lower().strip()
+    # a bank file path ("sound/windows/1981912997.bnk") or a bare bank id restricts to media held by that bank
+    bank_match = re.search(r"(\d+)\.bnk\b", q)
+    bank_filter = int(bank_match.group(1)) if bank_match else None
+    if bank_filter is not None:
+        sql += " AND mc.bank_ids_json LIKE ?"
+        params.append(f"%{bank_filter}%")
     sql += " ORDER BY c.score DESC, c.entity_key LIMIT ?"
-    params.append(limit * (4 if query else 1))
+    if bank_filter is not None:
+        params.append(1000000)  # the SQL LIKE already narrows to that bank
+    else:
+        params.append(limit * 50 if q else limit)
     rows = [dict(r) for r in db.query(sql, params)]
     ids = [r["source_id"] for r in rows]
     bank_ids = set()
@@ -128,13 +139,18 @@ def media_summary_rows(db: Database, inst_id: int, query: str = "", role: str = 
         r["bank_ids"] = loads(r.pop("bank_ids_json"), []) or []
         bank_ids.update(r["bank_ids"])
     names = best_names(db, ids + sorted(bank_ids))
-    q = query.lower().strip()
     out = []
     for r in rows:
         r["name"] = names.get(r["source_id"], "")
-        r["banks"] = ", ".join(names.get(b, str(b)) for b in r.pop("bank_ids"))
-        if q and q not in f"{r['source_id']} {r['name']} {r['banks']}".lower():
-            continue
+        media_banks = r.pop("bank_ids")
+        r["banks"] = ", ".join(names.get(b, str(b)) for b in media_banks)
+        if bank_filter is not None:
+            if bank_filter not in media_banks:
+                continue
+        elif q:
+            hay = f"{r['source_id']} {r['name']} {r['banks']} {' '.join(str(b) for b in media_banks)}".lower()
+            if q not in hay:
+                continue
         out.append(r)
         if len(out) >= limit:
             break

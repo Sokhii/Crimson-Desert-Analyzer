@@ -289,14 +289,67 @@ class InvestigationTools:
 
     def compare_files(self, a: str, b: str):
         da, db_ = self._read(a), self._read(b)
-        diffs = []
-        for i in range(min(len(da), len(db_))):
+        n = min(len(da), len(db_))
+        ranges: List[List[int]] = []
+        differing = 0
+        for i in range(n):
             if da[i] != db_[i]:
-                diffs.append(i)
-                if len(diffs) >= 16:
-                    break
-        return {"size_a": len(da), "size_b": len(db_), "sha1_a": hashlib.sha1(da).hexdigest(), "sha1_b": hashlib.sha1(db_).hexdigest(),
-                "identical": da == db_, "first_differences": diffs}
+                differing += 1
+                if ranges and i - ranges[-1][1] <= 8:  # merge nearby differences into one range
+                    ranges[-1][1] = i
+                else:
+                    ranges.append([i, i])
+        differing += abs(len(da) - len(db_))
+        out: Dict[str, Any] = {
+            "size_a": len(da), "size_b": len(db_), "sha1_a": hashlib.sha1(da).hexdigest(),
+            "sha1_b": hashlib.sha1(db_).hexdigest(), "identical": da == db_,
+            "differing_bytes": differing, "differing_ranges": len(ranges),
+            "ranges": [{"start": r0, "end": r1, "length": r1 - r0 + 1} for r0, r1 in ranges[:40]],
+        }
+        if len(ranges) > 40:
+            out["ranges_truncated"] = True
+        if bnkfmt.is_bank(da) and bnkfmt.is_bank(db_):
+            out["bank_comparison"] = self._compare_banks(da, db_)
+        return out
+
+    @staticmethod
+    def _compare_banks(da: bytes, db_: bytes) -> Dict[str, Any]:
+        ba, bb = bnkfmt.parse_bank(da), bnkfmt.parse_bank(db_)
+        chunks = []
+        ca = {c.tag: c for c in ba.chunks}
+        cb = {c.tag: c for c in bb.chunks}
+        for tag in sorted(set(ca) | set(cb)):
+            x, y = ca.get(tag), cb.get(tag)
+            same = bool(x and y and da[x.offset:x.offset + x.size] == db_[y.offset:y.offset + y.size])
+            chunks.append({"tag": tag, "size_a": x.size if x else None, "size_b": y.size if y else None, "identical": same})
+        oa = {o.object_id: da[o.offset:o.offset + o.size] for o in ba.objects}
+        ob = {o.object_id: db_[o.offset:o.offset + o.size] for o in bb.objects}
+        types = {o.object_id: o.type_name for o in ba.objects + bb.objects}
+        changed = [i for i in set(oa) & set(ob) if oa[i] != ob[i]]
+        only_a = sorted(set(oa) - set(ob))
+        only_b = sorted(set(ob) - set(oa))
+        media_a = {m.source_id: da[m.offset:m.offset + m.size] for m in ba.media}
+        media_b = {m.source_id: db_[m.offset:m.offset + m.size] for m in bb.media}
+
+        def by_type(ids):
+            counts: Dict[str, int] = {}
+            for i in ids:
+                counts[types.get(i, "?")] = counts.get(types.get(i, "?"), 0) + 1
+            return counts
+
+        return {
+            "header": {"bank_id": [ba.bank_id, bb.bank_id], "version": [ba.version, bb.version],
+                       "language_id": [ba.language_id, bb.language_id], "project_id": [ba.project_id, bb.project_id],
+                       "bank_hash_equal": ba.header_fields.get("bank_hash") == bb.header_fields.get("bank_hash")},
+            "chunks": chunks,
+            "objects": {"shared_identical": len(set(oa) & set(ob)) - len(changed), "shared_changed": len(changed),
+                        "changed_by_type": by_type(changed), "changed_examples": sorted(changed)[:10],
+                        "only_in_a": len(only_a), "only_in_a_by_type": by_type(only_a), "only_in_a_examples": only_a[:10],
+                        "only_in_b": len(only_b), "only_in_b_by_type": by_type(only_b), "only_in_b_examples": only_b[:10]},
+            "embedded_media": {"shared": len(set(media_a) & set(media_b)),
+                               "shared_changed": sum(1 for i in set(media_a) & set(media_b) if media_a[i] != media_b[i]),
+                               "only_in_a": len(set(media_a) - set(media_b)), "only_in_b": len(set(media_b) - set(media_a))},
+        }
 
     def inspect_bnk(self, bank):
         banks = queries.soundbanks(self.db, self.inst_id)

@@ -232,6 +232,56 @@ def test_twin_music_banks_get_a_task(db, app_paths, fake_game):
     assert twins and "bgm_copy.bnk" in twins[0].prompt
 
 
+def test_similar_but_different_banks_are_not_twins(db, app_paths, fake_game):
+    from cstudio.testing.builders import BankBuilder, make_wem, write_package
+
+    root, _ = fake_game
+    a, b = BankBuilder("small_a"), BankBuilder("small_b")
+    for bank, seconds in ((a, 2.0), (b, 9.0)):
+        bank.music_track(71, [7001], parent=72, durations_ms=[seconds * 1000], streaming=False)
+        bank.music_segment(72, [71], parent=0, duration_ms=seconds * 1000)
+        bank.embed(7001, make_wem(seconds=seconds))
+    write_package(root / "0008", {"sound/small_a.bnk": a.build(), "sound/small_b.bnk": b.build()})
+    res = Scanner(db, app_paths).run(root)
+    twins = [t for t in build_tasks(db, res.installation_id) if t.kind == "music_bank_twins"]
+    assert not any("small_a" in t.prompt for t in twins)
+
+
+def test_compare_files_reports_ranges_and_bank_structure(db, app_paths, fake_game):
+    from cstudio.formats.paz import ArchiveReader, parse_pamt
+    from cstudio.testing.builders import write_package
+
+    root, _ = fake_game
+    index = parse_pamt(root / "0004" / "0.pamt")
+    entry = [e for e in index.entries if e.path == "sound/bgm.bnk"][0]
+    with ArchiveReader() as reader:
+        bgm = bytearray(reader.read(entry))
+    bgm[12:16] = (123456).to_bytes(4, "little")  # only the bank id differs
+    write_package(root / "0007", {"sound/bgm_copy.bnk": bytes(bgm)})
+    res = Scanner(db, app_paths).run(root)
+    tools = InvestigationTools(db, app_paths, res.installation_id, KnowledgeStore(db, app_paths), "t", None)
+    try:
+        cmp = tools.call("compare_files", {"a": "0004/sound/bgm.bnk", "b": "0007/sound/bgm_copy.bnk"})
+    finally:
+        tools.close()
+    assert not cmp["identical"] and cmp["differing_ranges"] == 1 and cmp["ranges"][0]["start"] == 12
+    bank = cmp["bank_comparison"]
+    assert bank["header"]["bank_id"][1] == 123456
+    assert bank["objects"]["shared_changed"] == 0 and bank["objects"]["only_in_a"] == 0
+    assert {c["tag"]: c["identical"] for c in bank["chunks"]}["HIRC"] is True
+    assert bank["embedded_media"]["shared_changed"] == 0
+
+
+def test_search_music_assets_by_bank_path(tools):
+    from cstudio.formats.hashing import wwise_fnv1_32
+
+    bank_id = wwise_fnv1_32("bgm")
+    hits = tools.call("search_music_assets", {"query": f"sound/windows/{bank_id}.bnk"})["results"]
+    assert {h["source_id"] for h in hits} >= {433831842, 353733717, 480286974}
+    hits_id_text = tools.call("search_music_assets", {"query": str(bank_id)})["results"]
+    assert hits_id_text
+
+
 def test_agent_stop_and_pause(scanned, db, app_paths):
     result, _info, _root = scanned
     stop = threading.Event()

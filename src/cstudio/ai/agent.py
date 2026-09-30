@@ -170,7 +170,8 @@ def build_tasks(db: Database, inst_id: int, limit: int = 60) -> List[Investigati
 
     tasks: List[InvestigationTask] = []
     music_banks = _music_banks(db, inst_id)
-    signature = lambda b: (tuple(sorted(b["type_counts"].items())), b["embedded_media"], b["object_count"])  # noqa: E731
+    # twins must match in file size as well as structure; equal object counts alone pair unrelated small banks
+    signature = lambda b: (tuple(sorted(b["type_counts"].items())), b["embedded_media"], b["object_count"], b["size"])  # noqa: E731
     groups: Dict[tuple, List[dict]] = {}
     for b in music_banks:
         groups.setdefault(signature(b), []).append(b)
@@ -179,10 +180,10 @@ def build_tasks(db: Database, inst_id: int, limit: int = 60) -> List[Investigati
             paths = ", ".join(t["path"] for t in twins)
             tasks.append(InvestigationTask(
                 "music_bank_twins", f"Explain duplicated music banks ({len(twins)} banks)",
-                f"These banks have identical object and media counts: {paths}. Compare them (compare_files,"
-                " get_bnk_contents, inspect_bnk): are they byte-identical, or do they differ (e.g. streamed vs embedded"
-                " media, different bank ids only)? Record what differs, with the evidence. A replacement mod may need to"
-                " patch every copy, so this matters.", ",".join(str(t["bank_id"]) for t in twins)))
+                f"These banks have identical size, object and media counts: {paths}. Compare them with compare_files"
+                " (it reports differing byte ranges plus a chunk-by-chunk and object-by-object comparison for banks)."
+                " Record exactly what differs (header fields, which objects, which media) and what is shared, with the"
+                " evidence. A replacement mod may need to patch every copy, so this matters.", ",".join(str(t["bank_id"]) for t in twins)))
     music_events = _music_events(db, inst_id)
     by_bank: Dict[str, List[int]] = {}
     object_banks = {}
