@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import ssl
 import threading
 import time
@@ -22,7 +23,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from cstudio import __version__
 from cstudio.app_paths import AppPaths
@@ -69,25 +70,87 @@ def _request(url: str, headers: Optional[dict] = None, method: str = "GET") -> u
     return urllib.request.Request(url, headers=base, method=method)
 
 
-def fetch_expected(model: LocalModel, timeout: float = 20.0) -> dict:
-    """Expected ``{"sha256", "size"}`` from the Hugging Face tree API (best effort)."""
+_SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}\.gguf$", re.IGNORECASE)
 
-    if model.source != "huggingface" or not model.repository:
-        return {}
-    folder, _, _name = model.filename.rpartition("/")
-    url = f"https://huggingface.co/api/models/{model.repository}/tree/{model.revision or 'main'}"
-    if folder:
-        url += f"/{folder}"
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def list_repo_files(repository: str, revision: str = "main", timeout: float = 20.0) -> List[dict]:
+    """Files of a Hugging Face model repository (recursive). Raises DownloadError when unreachable."""
+
+    url = f"https://huggingface.co/api/models/{repository}/tree/{revision or 'main'}?recursive=true"
     try:
         with urllib.request.urlopen(_request(url), timeout=timeout, context=_ssl_context()) as resp:
             listing = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
+    except urllib.error.HTTPError as exc:
+        raise DownloadError(f"Hugging Face repository {repository} is not available (HTTP {exc.code})") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise DownloadError(f"could not list {repository}: {exc}") from exc
+    return [item for item in listing if isinstance(item, dict) and item.get("type", "file") == "file"]
+
+
+def pick_gguf(files: List[dict], filename: str, quantization: str) -> Optional[dict]:
+    """Choose the model file: exact name, then case-insensitive name, then quantization match."""
+
+    ggufs = [f for f in files if str(f.get("path", "")).lower().endswith(".gguf")
+             and "mmproj" not in f["path"].lower() and not _SPLIT_RE.search(f["path"])]
+    for f in ggufs:
+        if f["path"] == filename:
+            return f
+    for f in ggufs:
+        if f["path"].lower() == filename.lower() or f["path"].rsplit("/", 1)[-1].lower() == filename.lower():
+            return f
+    quant = _norm(quantization)
+    if quant:
+        matches = [f for f in ggufs if quant in _norm(f["path"].rsplit("/", 1)[-1])]
+        if matches:
+            return sorted(matches, key=lambda f: (f["path"].count("/"), len(f["path"])))[0]
+    return None
+
+
+def resolve_source(model: LocalModel) -> dict:
+    """Find the real file for a catalog model on Hugging Face.
+
+    Returns ``{"url", "repository", "path", "sha256", "size"}``. The catalog names a preferred
+    repository/file; repositories rename files and use different capitalisation, so the file is
+    looked up from the repository listing and alternative repositories are tried in order.
+    """
+
+    if model.source != "huggingface" or not model.repository:
+        return {"url": model.resolved_url()}
+    errors = []
+    for repository in [model.repository] + [r for r in model.alternate_repositories if r != model.repository]:
+        try:
+            files = list_repo_files(repository, model.revision)
+        except DownloadError as exc:
+            errors.append(str(exc))
+            continue
+        chosen = pick_gguf(files, model.filename, model.quantization)
+        if chosen is None:
+            names = [f["path"] for f in files if f["path"].lower().endswith(".gguf")][:8]
+            errors.append(f"{repository}: no {model.quantization or model.filename} GGUF file (has: {', '.join(names) or 'none'})")
+            continue
+        lfs = chosen.get("lfs") or {}
+        return {
+            "url": f"https://huggingface.co/{repository}/resolve/{model.revision or 'main'}/{chosen['path']}",
+            "repository": repository,
+            "path": chosen["path"],
+            "sha256": lfs.get("oid") or lfs.get("sha256"),
+            "size": lfs.get("size") or chosen.get("size"),
+        }
+    raise DownloadError("could not find the model file on Hugging Face:\n" + "\n".join(errors))
+
+
+def fetch_expected(model: LocalModel, timeout: float = 20.0) -> dict:
+    """Expected ``{"sha256", "size"}`` for verification (best effort)."""
+
+    try:
+        found = resolve_source(model)
+    except DownloadError:
         return {}
-    for item in listing if isinstance(listing, list) else []:
-        if item.get("path") == model.filename:
-            lfs = item.get("lfs") or {}
-            return {"sha256": lfs.get("oid") or lfs.get("sha256"), "size": lfs.get("size") or item.get("size")}
-    return {}
+    return {k: found[k] for k in ("sha256", "size") if found.get(k)}
 
 
 def download_model(
@@ -99,6 +162,12 @@ def download_model(
     url: Optional[str] = None,
 ) -> dict:
     cancel = cancel or threading.Event()
+    source: dict = {}
+    if url is None and model.source == "huggingface":
+        source = resolve_source(model)
+        url = source["url"]
+        if expected is None:
+            expected = {k: source[k] for k in ("sha256", "size") if source.get(k)}
     url = url or model.resolved_url()
     if not url:
         raise DownloadError(f"model {model.id} has no download source")
@@ -107,7 +176,7 @@ def download_model(
         raise DownloadError("models must be stored inside the application folder")
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(target.name + ".part")
-    expected = expected if expected is not None else fetch_expected(model)
+    expected = expected if expected is not None else {}
     total = expected.get("size")
 
     offset = partial.stat().st_size if partial.exists() else 0
@@ -119,6 +188,9 @@ def download_model(
             resp = None
         elif exc.code in (401, 403):
             raise DownloadError(f"access denied ({exc.code}); the model may require accepting a licence on Hugging Face") from exc
+        elif exc.code == 404:
+            raise DownloadError(f"the model file was not found (HTTP 404): {url}\nThe repository may have renamed or"
+                                " removed it; edit config/model_catalog.json or choose another model.") from exc
         else:
             raise DownloadError(f"HTTP {exc.code} while downloading {url}") from exc
     except (urllib.error.URLError, OSError) as exc:
@@ -155,6 +227,9 @@ def download_model(
     result = verify_file(partial, expected, cancel)
     partial.replace(target)
     result["path"] = str(target)
+    result["source_url"] = url
+    if source.get("repository"):
+        result["repository"] = source["repository"]
     if progress:
         progress(DownloadProgress(result["size"], result["size"], 0.0, "verified"))
     return result

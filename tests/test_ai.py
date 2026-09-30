@@ -208,3 +208,61 @@ def test_llama_server_backend_with_fake_server(app_paths, tmp_path):
     finally:
         backend.stop()
     assert "out of device memory" in (app_paths.logs / "llama-server.log").read_text()
+
+
+def test_pick_gguf_by_name_case_and_quantization():
+    from cstudio.ai.downloader import pick_gguf
+
+    files = [{"path": "README.md"}, {"path": "gpt-oss-20b-MXFP4.gguf", "lfs": {"oid": "a" * 64, "size": 5}},
+             {"path": "mmproj-F16.gguf"}, {"path": "big/model-Q4_K_M-00001-of-00002.gguf"},
+             {"path": "Qwen3-8B-Q4_K_M.gguf"}, {"path": "Qwen3-8B-Q8_0.gguf"}]
+    assert pick_gguf(files, "gpt-oss-20b-mxfp4.gguf", "MXFP4")["path"] == "gpt-oss-20b-MXFP4.gguf"
+    assert pick_gguf(files, "renamed.gguf", "Q4_K_M")["path"] == "Qwen3-8B-Q4_K_M.gguf"
+    assert pick_gguf(files, "gpt-oss-20b.MXFP4.gguf", "mxfp4")["path"] == "gpt-oss-20b-MXFP4.gguf"
+    assert pick_gguf(files, "nothing.gguf", "IQ2_XS") is None
+
+
+def test_resolve_source_falls_back_to_alternate_repo(monkeypatch):
+    from cstudio.ai import downloader
+
+    listings = {
+        "ggml-org/gpt-oss-20b-GGUF": [{"path": "README.md"}],
+        "lmstudio-community/gpt-oss-20b-GGUF": [{"path": "gpt-oss-20b-MXFP4.gguf", "lfs": {"oid": "b" * 64, "size": 12}}],
+    }
+
+    def fake_list(repo, revision="main", timeout=20.0):
+        if repo not in listings:
+            raise downloader.DownloadError(f"{repo} missing")
+        return listings[repo]
+
+    monkeypatch.setattr(downloader, "list_repo_files", fake_list)
+    model = LocalModel(id="g", display_name="g", tier="high", repository="ggml-org/gpt-oss-20b-GGUF",
+                       filename="gpt-oss-20b-mxfp4.gguf", quantization="MXFP4",
+                       alternate_repositories=["missing/repo", "lmstudio-community/gpt-oss-20b-GGUF"])
+    found = downloader.resolve_source(model)
+    assert found["url"] == "https://huggingface.co/lmstudio-community/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-MXFP4.gguf"
+    assert found["sha256"] == "b" * 64 and found["size"] == 12
+    model.alternate_repositories = []
+    with pytest.raises(downloader.DownloadError) as info:
+        downloader.resolve_source(model)
+    assert "README.md" not in str(info.value) and "no MXFP4" in str(info.value)
+
+
+def test_catalog_models_have_alternates():
+    from cstudio.config import RESOURCES
+
+    data = json.loads((RESOURCES / "model_catalog.json").read_text())
+    for m in data["models"]:
+        assert m["alternate_repositories"] and m["quantization"]
+
+
+def test_old_catalog_copy_is_upgraded(app_paths):
+    from cstudio.config import RESOURCES
+
+    app_paths.model_catalog_file.write_text(json.dumps({"catalog_version": 1, "models": [], "tiers": {}}))
+    ensure_default_config(app_paths)
+    upgraded = json.loads(app_paths.model_catalog_file.read_text())
+    assert upgraded["catalog_version"] == json.loads((RESOURCES / "model_catalog.json").read_text())["catalog_version"]
+    assert (app_paths.config / "model_catalog.v1.bak.json").is_file()
+    ensure_default_config(app_paths)  # idempotent once current
+    assert not (app_paths.config / "model_catalog.v2.bak.json").exists()

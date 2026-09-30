@@ -1,6 +1,6 @@
 {
-  "catalog_version": 1,
-  "notes": "Edit config/model_catalog.json next to the executable to change or add models. VRAM figures are approximate recommendations, not guarantees; llama.cpp can offload layers to the CPU when VRAM is short.",
+  "catalog_version": 2,
+  "notes": "Edit config/model_catalog.json next to the executable to change or add models. VRAM figures are approximate recommendations, not guarantees; llama.cpp can offload layers to the CPU when VRAM is short. The exact .gguf file is looked up in the repository listing (by name, then by quantization); alternate_repositories are tried in order if a repository is missing or lacks the file.",
   "tiers": {
     "low": {
       "label": "Low",
@@ -36,9 +36,17 @@
       "recommended_vram_gb": 4,
       "context_size": 8192,
       "json_mode": "schema",
-      "capabilities": ["chat", "tool-use-json", "classification"],
+      "capabilities": [
+        "chat",
+        "tool-use-json",
+        "classification"
+      ],
       "license": "Apache-2.0",
-      "license_url": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507"
+      "license_url": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+      "alternate_repositories": [
+        "lmstudio-community/Qwen3-4B-Instruct-2507-GGUF",
+        "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF"
+      ]
     },
     {
       "id": "gemma-3-4b-it-q4km",
@@ -54,9 +62,17 @@
       "recommended_vram_gb": 4,
       "context_size": 8192,
       "json_mode": "schema",
-      "capabilities": ["chat", "tool-use-json", "classification"],
+      "capabilities": [
+        "chat",
+        "tool-use-json",
+        "classification"
+      ],
       "license": "Gemma Terms of Use",
-      "license_url": "https://ai.google.dev/gemma/terms"
+      "license_url": "https://ai.google.dev/gemma/terms",
+      "alternate_repositories": [
+        "lmstudio-community/gemma-3-4b-it-GGUF",
+        "bartowski/google_gemma-3-4b-it-GGUF"
+      ]
     },
     {
       "id": "qwen3-8b-q4km",
@@ -72,9 +88,18 @@
       "recommended_vram_gb": 8,
       "context_size": 12288,
       "json_mode": "schema",
-      "capabilities": ["chat", "tool-use-json", "reasoning"],
+      "capabilities": [
+        "chat",
+        "tool-use-json",
+        "reasoning"
+      ],
       "license": "Apache-2.0",
-      "license_url": "https://huggingface.co/Qwen/Qwen3-8B"
+      "license_url": "https://huggingface.co/Qwen/Qwen3-8B",
+      "alternate_repositories": [
+        "Qwen/Qwen3-8B-GGUF",
+        "lmstudio-community/Qwen3-8B-GGUF",
+        "bartowski/Qwen_Qwen3-8B-GGUF"
+      ]
     },
     {
       "id": "qwen3-14b-q4km",
@@ -90,9 +115,18 @@
       "recommended_vram_gb": 12,
       "context_size": 12288,
       "json_mode": "schema",
-      "capabilities": ["chat", "tool-use-json", "reasoning"],
+      "capabilities": [
+        "chat",
+        "tool-use-json",
+        "reasoning"
+      ],
       "license": "Apache-2.0",
-      "license_url": "https://huggingface.co/Qwen/Qwen3-14B"
+      "license_url": "https://huggingface.co/Qwen/Qwen3-14B",
+      "alternate_repositories": [
+        "Qwen/Qwen3-14B-GGUF",
+        "lmstudio-community/Qwen3-14B-GGUF",
+        "bartowski/Qwen_Qwen3-14B-GGUF"
+      ]
     },
     {
       "id": "gpt-oss-20b-mxfp4",
@@ -108,9 +142,19 @@
       "recommended_vram_gb": 16,
       "context_size": 16384,
       "json_mode": "schema",
-      "capabilities": ["chat", "tool-use-json", "reasoning", "long-investigations"],
+      "capabilities": [
+        "chat",
+        "tool-use-json",
+        "reasoning",
+        "long-investigations"
+      ],
       "license": "Apache-2.0",
-      "license_url": "https://huggingface.co/openai/gpt-oss-20b"
+      "license_url": "https://huggingface.co/openai/gpt-oss-20b",
+      "alternate_repositories": [
+        "lmstudio-community/gpt-oss-20b-GGUF",
+        "bartowski/openai_gpt-oss-20b-GGUF",
+        "unsloth/gpt-oss-20b-GGUF"
+      ]
     },
     {
       "id": "qwen3-30b-a3b-instruct-2507-q4km",
@@ -126,9 +170,18 @@
       "recommended_vram_gb": 24,
       "context_size": 16384,
       "json_mode": "schema",
-      "capabilities": ["chat", "tool-use-json", "reasoning", "long-investigations"],
+      "capabilities": [
+        "chat",
+        "tool-use-json",
+        "reasoning",
+        "long-investigations"
+      ],
       "license": "Apache-2.0",
-      "license_url": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507"
+      "license_url": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "alternate_repositories": [
+        "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-GGUF",
+        "bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF"
+      ]
     }
   ]
 }

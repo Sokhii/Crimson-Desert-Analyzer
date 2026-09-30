@@ -38,6 +38,7 @@ class LocalModel:
     capabilities: List[str] = field(default_factory=list)
     license: str = ""
     license_url: str = ""
+    alternate_repositories: List[str] = field(default_factory=list)  # tried in order if the main repo lacks the file
     local_path: str = ""  # set for custom models / after download
 
     def resolved_url(self) -> str:

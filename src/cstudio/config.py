@@ -50,9 +50,22 @@ def ensure_default_config(paths: AppPaths) -> None:
     """Copy editable defaults (model catalog) into ``config/`` on first run."""
 
     target = paths.model_catalog_file
+    bundled_text = (RESOURCES / "model_catalog.json").read_text(encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text((RESOURCES / "model_catalog.json").read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(bundled_text, encoding="utf-8")
+        return
+    # upgrade an older copy (keeping a backup of the user's file)
+    try:
+        current = json.loads(target.read_text(encoding="utf-8")).get("catalog_version", 0)
+    except (OSError, ValueError):
+        current = -1
+    bundled = json.loads(bundled_text).get("catalog_version", 0)
+    if current < bundled:
+        backup = target.with_name(f"model_catalog.v{max(current, 0)}.bak.json")
+        if target.exists():
+            target.replace(backup)
+        target.write_text(bundled_text, encoding="utf-8")
 
 
 def resource_path(name: str) -> Optional[Path]:
