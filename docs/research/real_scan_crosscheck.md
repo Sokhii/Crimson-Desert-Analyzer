@@ -29,3 +29,11 @@ Source: the project owner's scan of the Steam installation (34 packages, 2,052,5
 
 - `media_context.banks` included every bank holding any *ancestor* container; shared parent mixers are duplicated into hundreds of banks, which inflated `relationships.json` to 4.7 GB and attached unrelated bank names to sounds. Banks now come from owning objects and embedding banks only; `relationships.json` is written compact.
 - No bank names were resolved because the game ships no SoundbanksInfo; importing the CSV provides hash-verified bank names.
+
+## Re-scan with the fixed build (2026-09-30, 14:27)
+
+- `relationships.json` 4.7 GB → 102 MB; scan time 248 s → 124 s.
+- Music results identical to the first scan: same 1,137 media IDs, same durations/codec/channels/rates, same file
+  hashes, same container chains, same soundbanks.
+- With media bank lists no longer inflated (most media now list 1-2 banks: `bgm` and its twin), the CSV's bank
+  column could be checked for **every** CSV ID present in the scan: 1,475 / 1,475 match (music and ambience).
