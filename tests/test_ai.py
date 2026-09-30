@@ -406,3 +406,10 @@ def test_agent_stops_repeating_itself(scanned, db, app_paths):
     assert len(steps) == 4  # 1 real call + 3 refused repeats, then the task is stopped
     assert '"repeated": true' in steps[1]["result_json"]
     assert "repeating" in db.scalar("SELECT summary FROM ai_session WHERE id=?", (state.session_id,))
+
+
+def test_find_actions_accepts_lists_and_explains_event_ids(tools):
+    both = tools.call("find_actions", {"target": "4001, 6002"})
+    assert both["total"] == 2
+    ev = tools.call("find_actions", {"kind": "Stop", "target": "60970509"})
+    assert ev["total"] == 0 and "are Events" in ev["hint"]

@@ -715,39 +715,66 @@ def _decode_music_switch(r: BinaryReader, v: int, obj: HircObject) -> None:
     if end > r.end:
         raise ParseError("decision tree exceeds object")
     leaves: List[Dict[str, object]] = []
-    _decision_tree(r, end, tree_size // 12, depth, leaves)
+    anomalies = _decision_tree(r.data, r.pos, tree_size // 12, depth, leaves)
     r.pos = end
-    obj.fields["decision_tree_leaves"] = leaves[:512]
+    obj.fields["decision_tree_nodes"] = tree_size // 12
+    obj.fields["decision_tree_leaf_count"] = len(leaves)
+    obj.fields["decision_tree_leaves"] = leaves[:MAX_STORED_LEAVES]
+    if anomalies:
+        obj.fields["decision_tree_anomalies"] = anomalies
     for leaf in leaves:
         node = int(leaf["audio_node_id"])  # type: ignore[arg-type]
         if node:
             obj.refs.append(("switch_assoc", node))
 
 
-def _decision_tree(r: BinaryReader, end: int, count_max: int, max_depth: int, leaves: List[Dict[str, object]]) -> None:
-    """Walk the flattened decision tree breadth-first (12-byte nodes)."""
+MAX_STORED_LEAVES = 5000
 
-    def walk(count: int, depth: int, path: List[int]) -> None:
-        nodes = []
-        for _ in range(count):
-            key = r.u32()
-            peek = struct.unpack_from("<I", r.data, r.pos)[0] if r.remaining() >= 4 else 0
-            idx, cnt = peek & 0xFFFF, (peek >> 16) & 0xFFFF
-            is_leaf = depth == max_depth or idx > count_max or cnt > count_max or r.pos + cnt * 12 > end
-            if is_leaf:
-                node_id = r.u32()
-                r.u16(); r.u16()
-                leaves.append({"path": path + [key], "audio_node_id": node_id})
-                nodes.append((key, 0))
+
+def _decision_tree(data: bytes, start: int, count: int, max_depth: int, leaves: List[Dict[str, object]]) -> int:
+    """Walk a Wwise decision tree by its explicit child indices.
+
+    The tree is a flat array of 12-byte nodes ``{key u32, (uIdx u16, uCount u16) | audioNodeId u32, weight u16,
+    probability u16}``; node 0 is the root and a branch's children are ``nodes[uIdx : uIdx + uCount]``. Nodes at
+    depth ``max_depth`` (one level per argument) are leaves holding an audio node id. Walking by index is correct
+    for any node order; reading nodes sequentially is only correct for single-level trees (verified on the game's
+    3-argument music switches).
+
+    A tree with no arguments has only a root and selects nothing, so it yields no leaves. Returns the number of
+    malformed branches (out-of-range child indices), which are skipped.
+    """
+
+    if count <= 0 or max_depth <= 0:
+        return 0
+    nodes = [struct.unpack_from("<IIHH", data, start + i * 12) for i in range(count)]
+    anomalies = 0
+    stack = [(0, 0, [])]
+    visited = 0
+    while stack:
+        index, depth, path = stack.pop()
+        visited += 1
+        if visited > count * 2:  # cycle guard
+            anomalies += 1
+            break
+        key, word, _weight, _prob = nodes[index]
+        here = path + [key] if depth else path
+        if depth == max_depth:
+            leaves.append({"path": here, "audio_node_id": word})
+            continue
+        child_idx, child_cnt = word & 0xFFFF, (word >> 16) & 0xFFFF
+        if child_cnt == 0:
+            continue
+        if child_idx <= index or child_idx + child_cnt > count:
+            # a leaf above the last argument level (partial path) stores an audio node id here
+            if depth > 0:
+                leaves.append({"path": here, "audio_node_id": word, "partial": True})
             else:
-                r.u16(); child_count = r.u16()
-                r.u16(); r.u16()
-                nodes.append((key, child_count))
-        for key, child_count in nodes:
-            if child_count:
-                walk(child_count, depth + 1, path + [key])
-
-    walk(1, 0, [])
+                anomalies += 1
+            continue
+        for child in range(child_idx + child_cnt - 1, child_idx - 1, -1):
+            stack.append((child, depth + 1, here))
+    leaves.sort(key=lambda leaf: leaf["path"])
+    return anomalies
 
 
 def _decode_music_ranseq(r: BinaryReader, v: int, obj: HircObject) -> None:

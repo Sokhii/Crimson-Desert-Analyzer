@@ -131,7 +131,8 @@ class InvestigationTools:
         a("find_actions", "Find Wwise actions by kind and what they act on, with the events that contain them. Use it to"
           " answer 'what starts/stops this?' or 'what sets this state/switch group?'.",
           {"kind": "optional action kind substring, e.g. Play, Stop, SetState, SetSwitch, Pause",
-           "target": "optional object id the action targets", "group": "optional state/switch group id it sets",
+           "target": "optional object id(s) the action targets (not event ids)",
+           "group": "optional state/switch group id(s) it sets",
            "limit": "default 30"}, self.find_actions)
         a("search_music_assets", "Search classified media (music/likely/possible) by name, id, bank or event.",
           {"query": "text", "limit": "default 20"}, self.search_music_assets)
@@ -411,9 +412,23 @@ class InvestigationTools:
     def find_referencing_objects(self, id):  # noqa: A002
         return {"referencing": queries.find_referencing(self.db, self.inst_id, self._int(id))}
 
+    def _id_list(self, value, name: str):
+        if value in (None, "", []):
+            return None
+        items = value if isinstance(value, (list, tuple)) else re.split(r"[,\s]+", str(value).strip())
+        return {self._int(v, name) for v in items if str(v).strip()}
+
     def find_actions(self, kind: str = "", target=None, group=None, limit: int = 30):
-        target_id = self._int(target, "target") if target not in (None, "") else None
-        group_id = self._int(group, "group") if group not in (None, "") else None
+        targets = self._id_list(target, "target")
+        groups = self._id_list(group, "group")
+        hints = []
+        if targets:
+            events = [r["object_id"] for r in self.db.query(
+                f"SELECT DISTINCT object_id FROM wwise_object WHERE type_code=4 AND object_id IN ({','.join('?' * len(targets))})",
+                sorted(targets))]
+            if events:
+                hints.append(f"{events} are Events, not action targets: an event CONTAINS actions (see get_object on the"
+                             " event); actions target containers/sounds.")
         kind_l = str(kind or "").lower()
         rows = self.db.query(
             "SELECT o.object_id, o.fields_json, a.vpath FROM wwise_object o JOIN asset a ON a.id=o.bank_asset_id"
@@ -424,9 +439,9 @@ class InvestigationTools:
             name = str(fields.get("action_name", ""))
             if kind_l and kind_l not in name.lower():
                 continue
-            if target_id is not None and fields.get("target_id") != target_id:
+            if targets is not None and fields.get("target_id") not in targets:
                 continue
-            if group_id is not None and group_id not in (fields.get("state_group_id"), fields.get("switch_group_id")):
+            if groups is not None and not ({fields.get("state_group_id"), fields.get("switch_group_id")} & groups):
                 continue
             matches.append((r, fields, name))
         out = []
@@ -441,8 +456,11 @@ class InvestigationTools:
         by_kind: Dict[str, int] = {}
         for _r, _f, name in matches:
             by_kind[name] = by_kind.get(name, 0) + 1
-        return {"total": len(matches), "by_kind": by_kind, "actions": out,
-                "note": None if matches else "no action in any scanned bank matches; the game code may do this directly"}
+        result = {"total": len(matches), "by_kind": by_kind, "actions": out,
+                  "note": None if matches else "no action in any scanned bank matches; the game code may do this directly"}
+        if hints:
+            result["hint"] = " ".join(hints)
+        return result
 
     def search_music_assets(self, query: str = "", limit: int = 20):
         rows = queries.media_summary_rows(self.db, self.inst_id, str(query or ""), role="music*", limit=min(int(limit or 20), 100))

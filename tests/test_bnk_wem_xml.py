@@ -136,3 +136,45 @@ def test_multi_root_xml_reports_real_root_tag():
     info = parse_soundbanksinfo(b"<ModelScriptMatchingTable a='1'/><ModelScriptMatchingTable a='2'/>")
     assert info.root_tag == "ModelScriptMatchingTable" and info.multiple_roots
     assert "CStudioWrappedRoot" not in info.tag_counts
+
+
+def _switch_with_tree(tree: bytes, depth: int, groups):
+    from cstudio.testing.builders import u8, u32
+
+    b = BankBuilder("t")
+    body = b._trans_node([], 0)
+    body += u8(0) + u32(depth) + b"".join(u32(g) for g in groups) + b"".join(u8(1) for _ in groups)
+    body += u32(len(tree)) + u8(0) + tree
+    b.raw_object(0x0C, 77, body)
+    return bnk.parse_bank(b.build()).objects[0]
+
+
+def _node(key, word, weight=50, prob=100):
+    return struct.pack("<IIHH", key, word, weight, prob)
+
+
+def test_decision_tree_follows_child_indices_not_order():
+    # 2 arguments; the children of branch A are stored AFTER those of branch B (as in the game's 3-argument trees),
+    # so reading nodes in sequence would pair the wrong leaves with the wrong paths.
+    A, B = 111, 222
+    tree = (_node(0, (2 << 16) | 1)            # 0 root -> [1, 2]
+            + _node(A, (2 << 16) | 5)          # 1 A -> [5, 6]
+            + _node(B, (2 << 16) | 3)          # 2 B -> [3, 4]
+            + _node(1, 9003) + _node(2, 9004)  # 3,4 children of B
+            + _node(1, 9001) + _node(2, 9002)) # 5,6 children of A
+    obj = _switch_with_tree(tree, 2, [5, 6])
+    assert obj.parse_status == "parsed"
+    got = {tuple(leaf["path"]): leaf["audio_node_id"] for leaf in obj.fields["decision_tree_leaves"]}
+    assert got == {(A, 1): 9001, (A, 2): 9002, (B, 1): 9003, (B, 2): 9004}
+    assert obj.fields["decision_tree_leaf_count"] == 4
+
+
+def test_decision_tree_without_arguments_has_no_leaves():
+    obj = _switch_with_tree(_node(0, 1), 0, [])
+    assert obj.fields["decision_tree_leaf_count"] == 0
+    assert not [t for k, t in obj.refs if k == "switch_assoc"]  # no bogus reference to id 1
+
+
+def test_decision_tree_bad_index_is_counted_not_fatal():
+    obj = _switch_with_tree(_node(0, (5 << 16) | 1) + _node(7, 42), 1, [5])
+    assert obj.parse_status == "parsed" and obj.fields["decision_tree_anomalies"] == 1

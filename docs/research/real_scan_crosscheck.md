@@ -37,3 +37,20 @@ Source: the project owner's scan of the Steam installation (34 packages, 2,052,5
   hashes, same container chains, same soundbanks.
 - With media bank lists no longer inflated (most media now list 1-2 banks: `bgm` and its twin), the CSV's bank
   column could be checked for **every** CSV ID present in the scan: 1,475 / 1,475 match (music and ambience).
+
+## Music switch decision trees (verified on the exported `412724365.bnk`, 2026-09-30)
+
+- **Experimentally verified:** the decision tree is a flat array of 12-byte nodes `{key, uIdx:u16|uCount:u16 or
+  audioNodeId, weight, probability}`; node 0 is the root and a branch's children are `nodes[uIdx : uIdx+uCount]`.
+  Children are *not* stored in reading order for multi-argument trees (e.g. a 3-argument tree whose first level
+  points to indices 181, 187, 193, ...). Sequential reading produced wrong leaves for 3-argument switches; walking
+  by index fixes it (`102548524`: 717/717 leaves resolve to MusicRandomSequenceContainers).
+- **Experimentally verified:** switch containers with no arguments carry a single root node and select nothing
+  (previously mis-read as a leaf pointing at id `1`).
+- **Experimentally verified:** `bgm` contains two "mirror" switch containers under parent `363776544`:
+  `725591625` mirrors `102548524` (identical 3 state groups and 717 key paths) and `919159439` mirrors
+  `244399752` (same state group, 1,469 of its state keys). Every leaf of the mirrors points to an id that exists in
+  no bank of the installation (206 and 1,452 distinct 30-bit ids). The real hierarchy is under `347759289`, which
+  the bank's only event plays. These dangling references are shipped data (cut/unused content), not a parser error.
+- **Inferred:** music state groups (e.g. `1788622765`) are never set by any Wwise action in any bank, so the game
+  code sets them directly.
