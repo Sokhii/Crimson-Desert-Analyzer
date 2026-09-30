@@ -2,9 +2,10 @@
 
 Unknowns are aggregated by *signature* (e.g. ``hirc_partial:v150:MusicTrack``)
 so a recurring structure is one work item with an occurrence count and
-examples, not thousands of rows. Signatures that a verified/probable
-knowledge finding explains are marked ``explained`` automatically - this is
-how an investigation done once makes later scans easier.
+examples, not thousands of rows. Signatures that a *verified* knowledge
+finding explains are marked ``explained`` automatically - this is how an
+investigation done once makes later scans easier. A merely probable
+explanation is linked via ``knowledge_uid`` but leaves the structure open.
 """
 
 from __future__ import annotations
@@ -101,6 +102,10 @@ def detect(db: Database, inst_id: int, scan_id: int, knowledge=None) -> int:
         elif r["codec"] and r["codec"].startswith("unknown"):
             add(f"wem_codec:0x{(r['format_tag'] or 0):04X}", "wem_format", f"Unknown WEM codec {r['codec']}", {"path": r["vpath"]})
     for r in db.query("SELECT x.*, a.vpath FROM xml_doc x JOIN asset a ON a.id=x.asset_id WHERE a.installation_id=?", (inst_id,)):
+        if not r["root_tag"]:
+            add("xml_parse_error", "read_error", "XML files that could not be parsed",
+                {"path": r["vpath"], "errors": (loads(r["errors_json"], []) or [])[:2]})
+            continue
         if not r["recognized"]:
             add(f"xml_schema:{r['root_tag']}", "xml", f"XML document with root <{r['root_tag']}> is not a known Wwise schema",
                 {"path": r["vpath"], "tags": dict(list((loads(r["tag_counts_json"], {}) or {}).items())[:20])})
@@ -124,7 +129,12 @@ def detect(db: Database, inst_id: int, scan_id: int, knowledge=None) -> int:
         for sig, item in found.items():
             prior = existing.get(sig)
             explained = explanations.get(sig)
-            status = "explained" if explained else (prior["status"] if prior and prior["status"] == "resolved" else "open")
+            # Only a *verified* explanation closes an unknown. A probable one is linked (knowledge_uid) but the
+            # structure stays open, so an unproven AI guess can never hide a real open question.
+            if explained and explained["status"] == "verified":
+                status = "explained"
+            else:
+                status = "resolved" if prior and prior["status"] == "resolved" else "open"
             conn.execute(
                 "INSERT INTO unknown_structure(installation_id, signature, category, entity_type, entity_key, description,"
                 " details_json, occurrences, first_scan_id, last_scan_id, status, knowledge_uid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",

@@ -31,7 +31,7 @@ from . import music, names, relationships, reports, unknowns
 from .discovery import (AUDIO_DIR_TOKENS, AUDIO_EXTENSIONS, AUDIO_METADATA_EXTENSIONS, AUDIO_NAME_TOKENS, DiscoveredFile,
                         detect_layout, is_audio_relevant, walk_installation)
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2  # 2: XML documents with several top-level elements report their real root tag
 WEM_HEADER_BYTES = 256 * 1024
 
 

@@ -442,14 +442,50 @@ class InvestigationTools:
             out.append(item if isinstance(item, dict) else {"note": str(item)[:600]})
         return out[:20]
 
+    _STATUS_RANK = {"unknown": 0, "hypothesis": 1, "probable": 2, "verified": 3}
+
+    @staticmethod
+    def _norm_title(title: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(title).lower()).strip()
+
+    def _existing_duplicate(self, category: str, subject_type: str, subject_key: str, title: str):
+        """An earlier AI finding about the same thing: same category+subject, or same category+title."""
+
+        rows = self.db.query(
+            "SELECT uid, status, title, subject_type, subject_key FROM finding WHERE category=? AND status<>'rejected'"
+            " AND created_by LIKE 'ai:%'", (category,))
+        norm = self._norm_title(title)
+        for r in rows:
+            if subject_key and r["subject_type"] == subject_type and r["subject_key"] == subject_key:
+                return r
+        for r in rows:
+            if norm and self._norm_title(r["title"]) == norm:
+                return r
+        return None
+
+    def _store(self, *, title, statement, status, category, subject_type, subject_key, evidence, reasoning):
+        dup = self._existing_duplicate(category, subject_type, subject_key, title)
+        uid = None
+        if dup is not None:
+            uid = dup["uid"]
+            if self._STATUS_RANK.get(dup["status"], 0) > self._STATUS_RANK.get(status, 0):
+                status = dup["status"]  # never downgrade an earlier, stronger finding
+            subject_type, subject_key = dup["subject_type"], dup["subject_key"]
+        finding = self.knowledge.record(
+            title=str(title)[:200], statement=str(statement)[:2000], status=status, category=str(category)[:60],
+            subject_type=str(subject_type), subject_key=str(subject_key), evidence=evidence,
+            reasoning=str(reasoning)[:2000], created_by=f"ai:{self.model_id or 'model'}", model_id=self.model_id,
+            session_id=self.session_id, uid=uid)
+        out = {"recorded": finding["uid"], "status": finding["status"]}
+        if dup is not None:
+            out["merged"] = "an earlier finding about the same subject/title was updated instead of creating a duplicate"
+        return out
+
     def record_hypothesis(self, title: str, statement: str, subject_type: str = "general", subject_key: str = "",
                           evidence=None, reasoning: str = ""):
-        finding = self.knowledge.record(
-            title=str(title)[:200], statement=str(statement)[:2000], status="hypothesis", category="hypothesis",
-            subject_type=str(subject_type), subject_key=str(subject_key), evidence=self._evidence(evidence),
-            reasoning=str(reasoning)[:2000], created_by=f"ai:{self.model_id or 'model'}", model_id=self.model_id,
-            session_id=self.session_id)
-        return {"recorded": finding["uid"], "status": finding["status"]}
+        return self._store(title=title, statement=statement, status="hypothesis", category="hypothesis",
+                           subject_type=str(subject_type), subject_key=str(subject_key),
+                           evidence=self._evidence(evidence), reasoning=reasoning)
 
     def record_finding(self, title: str, statement: str, status: str = "hypothesis", category: str = "general",
                        subject_type: str = "general", subject_key: str = "", evidence=None, reasoning: str = ""):
@@ -462,11 +498,9 @@ class InvestigationTools:
         evidence = self._evidence(evidence)
         if status == "probable" and len(evidence) < 2:
             status, note = "hypothesis", "probable needs at least two independent evidence items; stored as hypothesis"
-        finding = self.knowledge.record(
-            title=str(title)[:200], statement=str(statement)[:2000], status=status, category=str(category)[:60],
-            subject_type=str(subject_type), subject_key=str(subject_key), evidence=evidence, reasoning=str(reasoning)[:2000],
-            created_by=f"ai:{self.model_id or 'model'}", model_id=self.model_id, session_id=self.session_id)
-        out = {"recorded": finding["uid"], "status": finding["status"]}
+        out = self._store(title=title, statement=statement, status=status, category=str(category)[:60],
+                          subject_type=str(subject_type), subject_key=str(subject_key), evidence=evidence,
+                          reasoning=reasoning)
         if note:
             out["note"] = note
         return out

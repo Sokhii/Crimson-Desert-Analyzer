@@ -130,3 +130,9 @@ def test_soundbanksinfo_new_schema_and_unknown_xml():
     assert broken.errors
     fragments = parse_soundbanksinfo(b"<Bank Id='1' Name='one'/><Bank Id='2' Name='two'/>")
     assert len(fragments.named_objects) == 2
+
+
+def test_multi_root_xml_reports_real_root_tag():
+    info = parse_soundbanksinfo(b"<ModelScriptMatchingTable a='1'/><ModelScriptMatchingTable a='2'/>")
+    assert info.root_tag == "ModelScriptMatchingTable" and info.multiple_roots
+    assert "CStudioWrappedRoot" not in info.tag_counts

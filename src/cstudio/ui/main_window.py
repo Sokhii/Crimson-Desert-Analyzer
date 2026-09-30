@@ -730,7 +730,8 @@ class MainWindow(QMainWindow):
         counts = p.get("counts") or {}
         self.ai_labels["status"].setText(str(p.get("status", "")).capitalize() + (f" — {p['message']}" if p.get("message") else ""))
         self.ai_labels["current_task"].setText(f"[{p.get('task_index')}/{p.get('task_total')}] {p.get('current_task', '')}")
-        self.ai_labels["steps"].setText(str(p.get("steps", 0)))
+        invalid = p.get("invalid_replies", 0)
+        self.ai_labels["steps"].setText(f"{p.get('steps', 0)}" + (f"  ({invalid} unreadable replies)" if invalid else ""))
         for key in ("verified", "probable", "hypothesis"):
             self.ai_labels[key].setText(str(counts.get(key, 0)))
         self.ai_labels["unknowns_remaining"].setText(str(p.get("unknowns_remaining", 0)))

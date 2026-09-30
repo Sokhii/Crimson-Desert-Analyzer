@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+WRAPPED_ROOT = "CStudioWrappedRoot"  # internal wrapper for documents with several top-level elements
 _ID_ATTRS = ("Id", "ID", "id", "ShortId", "ShortID")
 _NAME_ATTRS = ("Name", "name", "ShortName")
 
@@ -88,6 +89,7 @@ class SoundbanksInfo:
     soundbank_version: str = ""
     platform: str = ""
     recognized_schema: bool = False
+    multiple_roots: bool = False
     banks: List[XmlBank] = field(default_factory=list)
     events: List[XmlEvent] = field(default_factory=list)
     media: List[XmlMedia] = field(default_factory=list)
@@ -172,12 +174,17 @@ def parse_soundbanksinfo(data: bytes) -> SoundbanksInfo:
         try:
             text = _decode(data).decode("utf-8", errors="replace")
             text = re.sub(r"^﻿?\s*<\?xml[^>]*\?>", "", text)
-            root = ET.fromstring(f"<CStudioWrappedRoot>{text}</CStudioWrappedRoot>")
+            root = ET.fromstring(f"<{WRAPPED_ROOT}>{text}</{WRAPPED_ROOT}>")
             info.errors.append(f"document had no single root element ({exc}); parsed wrapped")
         except ET.ParseError as exc2:
             info.errors.append(f"XML parse error: {exc2}")
             return info
     info.root_tag = _local(root.tag)
+    if info.root_tag == WRAPPED_ROOT:
+        # several top-level elements: report the real first element, not our wrapper
+        first = next(iter(root), None)
+        info.root_tag = _local(first.tag) if first is not None else "(empty)"
+        info.multiple_roots = True
     info.schema_version = root.get("SchemaVersion", "")
     info.soundbank_version = root.get("SoundbankVersion", "") or root.get("SoundBankVersion", "")
     info.platform = root.get("Platform", "")
@@ -192,6 +199,10 @@ def _walk(el: ET.Element, info: SoundbanksInfo, ancestors: List[str], bank_id: O
           parent_named: Optional[int], media_by_key: Dict[tuple, XmlMedia]) -> None:
     tag = _local(el.tag)
     low = tag.lower()
+    if tag == WRAPPED_ROOT:
+        for child in el:
+            _walk(child, info, ancestors, bank_id, parent_named, media_by_key)
+        return
     info.tag_counts[tag] = info.tag_counts.get(tag, 0) + 1
     if low not in _KNOWN_TAGS:
         info.unrecognized_tags[tag] = info.unrecognized_tags.get(tag, 0) + 1

@@ -26,7 +26,11 @@ def main():
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             schema = (body.get("response_format") or {}).get("json_schema", {}).get("schema")
             content = json.dumps({"ok": True, "word": "hello"}) if schema else "hello"
-            reply = {"choices": [{"message": {"role": "assistant", "content": content}}], "ngl": args[args.index("-ngl") + 1]}
+            if (body.get("chat_template_kwargs") or {}).get("enable_thinking") is not False:
+                content = ""  # emulate a thinking model that used the whole budget on reasoning
+            reply = {"choices": [{"message": {"role": "assistant", "content": content,
+                                              "reasoning_content": "thinking..."}, "finish_reason": "stop"}],
+                     "ngl": args[args.index("-ngl") + 1]}
             data = json.dumps(reply).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

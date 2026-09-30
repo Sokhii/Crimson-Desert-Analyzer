@@ -46,7 +46,19 @@ Rules:
 - Only mark_verified can make something verified, and only with a deterministic check that passes.
 - For an unknown structure you explained, use category "unknown_structure_explanation" and subject_key = its signature.
 - Do not classify gameplay context (boss/town/combat...). Focus on what assets exist, how they connect, and evidence.
+- Record only NEW conclusions. Do not record facts the tools already report (types, tempo, container chains).
+- An unknown structure stays open until mark_verified passes; a probable explanation does not close it.
 - Keep thoughts short. When the task is done (or you are stuck), call finish_task with a summary.
+
+Wwise facts (use them, do not contradict them):
+- MusicTrack plays WEM clips; MusicSegment is a timed section (duration, entry/exit markers) holding tracks;
+  MusicRandomSequenceContainer is a playlist of segments; MusicSwitchContainer picks a child with a decision tree
+  keyed by its "arguments" (state groups or switch groups).
+- RTPC references are parameter curves (volume, filter, pitch...). They do NOT select which music plays.
+- Events hold actions. Play/Stop actions target an object; SetState/SetSwitch actions change the group values
+  that switch containers read.
+- All HIRC object types in these banks that matter for music are fully decoded; "header_only" types are effects,
+  attenuations and modulators.
 
 Tools:
 {tools}
@@ -85,6 +97,7 @@ class AgentProgress:
     last_result: str = ""
     counts: Dict[str, int] = field(default_factory=dict)
     unknowns_remaining: int = 0
+    invalid_replies: int = 0
     message: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -120,43 +133,113 @@ def parse_action(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+MUSIC_TYPES = ("MusicSegment", "MusicTrack", "MusicSwitchContainer", "MusicRandomSequenceContainer")
+# unknown-structure signatures that concern the music hierarchy
+MUSIC_UNKNOWN_PREFIXES = ("dangling_ref:transition_segment", "dangling_ref:stinger_segment", "dangling_ref:switch_assoc",
+                          "dangling_ref:playlist_segment")
+
+
+def _music_banks(db: Database, inst_id: int) -> List[dict]:
+    """Banks holding MusicTracks, most music first, with structural twins grouped."""
+
+    banks = [b for b in queries.soundbanks(db, inst_id) if b["type_counts"].get("MusicTrack")]
+    banks.sort(key=lambda b: (-b["type_counts"].get("MusicTrack", 0), b["path"]))
+    return banks
+
+
+def _music_events(db: Database, inst_id: int) -> Dict[int, List[int]]:
+    """event id -> music objects its actions target (Play/Stop/Seek... on the music hierarchy)."""
+
+    from cstudio.analyzer.relationships import load_graph
+
+    g = load_graph(db, inst_id)
+    out: Dict[int, List[int]] = {}
+    for event, actions in g.event_actions.items():
+        targets = sorted({t for a in actions for t in g.action_targets.get(a, ()) if g.types.get(t, "") in MUSIC_TYPES})
+        if targets:
+            out[event] = targets
+    return out
+
+
 def build_tasks(db: Database, inst_id: int, limit: int = 60) -> List[InvestigationTask]:
+    """Music-relevant questions first, then the remaining open unknowns.
+
+    Bank *names* are deliberately not a goal: identification works on IDs. Tasks carry the concrete IDs the model
+    needs so it does not have to hunt for them.
+    """
+
     tasks: List[InvestigationTask] = []
-    for u in queries.unknown_structures(db, inst_id, "open"):
+    music_banks = _music_banks(db, inst_id)
+    signature = lambda b: (tuple(sorted(b["type_counts"].items())), b["embedded_media"], b["object_count"])  # noqa: E731
+    groups: Dict[tuple, List[dict]] = {}
+    for b in music_banks:
+        groups.setdefault(signature(b), []).append(b)
+    for twins in groups.values():
+        if len(twins) > 1:
+            paths = ", ".join(t["path"] for t in twins)
+            tasks.append(InvestigationTask(
+                "music_bank_twins", f"Explain duplicated music banks ({len(twins)} banks)",
+                f"These banks have identical object and media counts: {paths}. Compare them (compare_files,"
+                " get_bnk_contents, inspect_bnk): are they byte-identical, or do they differ (e.g. streamed vs embedded"
+                " media, different bank ids only)? Record what differs, with the evidence. A replacement mod may need to"
+                " patch every copy, so this matters.", ",".join(str(t["bank_id"]) for t in twins)))
+    music_events = _music_events(db, inst_id)
+    by_bank: Dict[str, List[int]] = {}
+    object_banks = {}
+    for r in db.query(
+        "SELECT o.object_id, a.vpath FROM wwise_object o JOIN asset a ON a.id=o.bank_asset_id WHERE a.installation_id=?"
+        " AND o.type_code IN (10,11,12,13)", (inst_id,)):
+        object_banks.setdefault(r["object_id"], set()).add(r["vpath"])
+    for event, targets in music_events.items():
+        for t in targets:
+            for path in object_banks.get(t, ()):
+                by_bank.setdefault(path, [])
+                if event not in by_bank[path]:
+                    by_bank[path].append(event)
+    for b in music_banks[:6]:
+        events = by_bank.get(b["path"], [])
+        if not events:
+            continue
+        ids = ", ".join(str(e) for e in events[:15])
+        tasks.append(InvestigationTask(
+            "music_events", f"How is the music in {b['path']} started and stopped?",
+            f"Bank {b['path']} holds {b['type_counts'].get('MusicTrack')} MusicTracks. These events have actions that"
+            f" target its music objects: {ids}{' ...' if len(events) > 15 else ''}. For a few of them use get_object on"
+            " the event, its actions (Play/Stop/SetState...) and the targets (get_container) to describe which music"
+            " container each event starts or stops and which state/switch groups the targets depend on. Record one"
+            " finding per bank summarising the pattern (category relationship, subject_type bank, subject_key the bank"
+            " id), not one per event.", str(b["bank_id"])))
+    switches = db.query(
+        "SELECT o.object_id, o.fields_json FROM wwise_object o JOIN asset a ON a.id=o.bank_asset_id"
+        " WHERE a.installation_id=? AND o.type_code=12 GROUP BY o.object_id ORDER BY length(o.fields_json) DESC LIMIT 12",
+        (inst_id,))
+    for sw in switches:
+        fields = json.loads(sw["fields_json"] or "{}")
+        args = fields.get("arguments") or []
+        groups_txt = ", ".join(f"{a.get('group_type')} group {a.get('group_id')}" for a in args) or "none decoded"
+        leaves = len(fields.get("decision_tree_leaves") or [])
+        tasks.append(InvestigationTask(
+            "music_switch", f"What selects the music in switch container {sw['object_id']}?",
+            f"Music switch container {sw['object_id']} (fully decoded by the parser) chooses a child from its decision"
+            f" tree ({leaves} leaves) using these arguments: {groups_txt}. Use get_object/get_container to see which"
+            " playlists/segments each branch leads to, and find_referencing_objects / find_references on the group ids"
+            " to find the events or SetState/SetSwitch actions that change them. Record what drives the selection"
+            " (category relationship, subject_type object, subject_key the container id).", str(sw["object_id"])))
+    unknowns = queries.unknown_structures(db, inst_id, "open")
+    music_unknowns = [u for u in unknowns if u["signature"].startswith(MUSIC_UNKNOWN_PREFIXES)]
+    rest = [u for u in unknowns if u not in music_unknowns]
+    rest.sort(key=lambda u: (u.get("knowledge_uid") is not None, -u["occurrences"]))
+    for u in music_unknowns + rest:
         examples = json.dumps((u.get("details") or {}).get("examples", [])[:4], default=str)
+        linked = f"\nAn earlier unverified explanation exists: {u['knowledge_uid']} (test it; reject it if wrong)." \
+            if u.get("knowledge_uid") else ""
         tasks.append(InvestigationTask(
             "unknown_structure", f"Explain unknown structure {u['signature']}",
             f"Unknown structure signature: {u['signature']}\nCategory: {u['category']}\nOccurrences: {u['occurrences']}\n"
-            f"Description: {u['description']}\nExamples: {examples}\n"
-            "Investigate what this is (inspect the bytes/objects/files involved, compare examples, check references),"
-            " then record a hypothesis or finding with evidence (category unknown_structure_explanation, subject_key = signature).",
-            u["signature"]))
-    unnamed_banks = [b for b in queries.soundbanks(db, inst_id) if not b["name"]]
-    for b in unnamed_banks[:10]:
-        tasks.append(InvestigationTask(
-            "bank_name", f"Find the name of bank {b['bank_id']}",
-            f"Bank {b['path']} has id {b['bank_id']} but no known name. Bank ids are FNV-1 hashes of the bank name."
-            " Use its contents, events, file names and search_files/extract_strings to propose names and test them with"
-            " test_names. If a name matches, record_finding (category name_mapping, subject_type name, subject_key the id)"
-            " then mark_verified with a name_hash check.", str(b["bank_id"])))
-    music = queries.media_summary_rows(db, inst_id, role="music*", limit=200)
-    unnamed_music = [m for m in music if not m["name"]]
-    if unnamed_music:
-        ids = ", ".join(str(m["source_id"]) for m in unnamed_music[:12])
-        tasks.append(InvestigationTask(
-            "music_context", "Gather context for unnamed music media",
-            f"These media ids are classified as music but have no name: {ids}. Use get_wem_info, get_container and"
-            " find_references to describe how they are organised (segments, playlists, switch containers, events) and"
-            " record findings about their structure and role evidence (no gameplay taxonomy).", "music"))
-    switches = db.query(
-        "SELECT o.object_id FROM wwise_object o JOIN asset a ON a.id=o.bank_asset_id WHERE a.installation_id=? AND o.type_code=12 LIMIT 5",
-        (inst_id,))
-    for s in switches:
-        tasks.append(InvestigationTask(
-            "music_switch", f"Understand music switch container {s['object_id']}",
-            f"Music switch container {s['object_id']} selects music by state/switch. Inspect it (get_object, get_container),"
-            " name its switch groups/states with test_names if possible, and record what drives the music selection.",
-            str(s["object_id"])))
+            f"Description: {u['description']}\nExamples: {examples}{linked}\n"
+            "Investigate what this is (inspect the bytes/objects/files involved, compare several examples, check"
+            " references), then record a hypothesis or finding with evidence (category unknown_structure_explanation,"
+            " subject_key = signature). If a deterministic check can prove it, call mark_verified.", u["signature"]))
     return tasks[:limit]
 
 
@@ -164,7 +247,7 @@ class Investigator:
     def __init__(self, db: Database, paths: AppPaths, inst_id: int, backend: InferenceBackend, model_id: str,
                  progress: Optional[Callable[[AgentProgress], None]] = None, stop: Optional[threading.Event] = None,
                  pause: Optional[threading.Event] = None, max_steps_per_task: int = 14, max_total_steps: int = 400,
-                 history_window: int = 8) -> None:
+                 history_window: int = 8, max_reply_tokens: int = 1500) -> None:
         self.db = db
         self.paths = paths
         self.inst_id = inst_id
@@ -176,6 +259,7 @@ class Investigator:
         self.max_steps_per_task = max_steps_per_task
         self.max_total_steps = max_total_steps
         self.history_window = history_window
+        self.max_reply_tokens = max_reply_tokens
         self.knowledge = KnowledgeStore(db, paths)
         self.state = AgentProgress(model=model_id)
 
@@ -234,7 +318,8 @@ class Investigator:
             self.knowledge.write_research_note(
                 f"ai-session-{session_id}",
                 f"# AI investigation session {session_id}\n\nModel: {self.model_id}\nStatus: {status}\n"
-                f"Steps: {self.state.steps}\n\n## Tasks\n{summary}\n")
+                f"Steps: {self.state.steps}\nInvalid replies: {self.state.invalid_replies}"
+                f" (raw text stored in ai_step with tool '_invalid_reply')\n\n## Tasks\n{summary}\n")
             self.state.status = status
             self._emit()
         return self.state
@@ -249,10 +334,19 @@ class Investigator:
             messages = [{"role": "system", "content": system},
                         {"role": "user", "content": f"TASK: {task.title}\n\n{task.prompt}\n\nStart investigating."}]
             messages += history[-self.history_window * 2:]
-            raw = self.backend.chat(messages, json_schema=schema, max_tokens=700, temperature=0.2)
+            raw = self.backend.chat(messages, json_schema=schema, max_tokens=self.max_reply_tokens, temperature=0.2)
             action = parse_action(raw)
             if action is None:
                 failures += 1
+                self.state.invalid_replies += 1
+                # keep the raw reply so failures can be diagnosed later (not counted as a step)
+                info = dict(getattr(self.backend, "last_reply_info", {}) or {})
+                self.db.execute(
+                    "INSERT INTO ai_step(session_id, step_no, thought, tool, args_json, result_json, created_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (session_id, self.state.steps, f"invalid reply for task: {task.title}", "_invalid_reply",
+                     dumps(info), (raw or "")[:4000], now_iso()))
+                self.db.commit()
                 history.append({"role": "assistant", "content": raw[:500]})
                 history.append({"role": "user", "content": 'Invalid reply. Answer with ONE JSON object {"thought":...,"tool":...,"args":{...}}.'})
                 if failures >= 3:

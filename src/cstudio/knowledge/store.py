@@ -159,10 +159,13 @@ class KnowledgeStore:
         """Unknown-structure explanations keyed by structure signature."""
 
         out: Dict[str, Dict[str, Any]] = {}
+        rank = {"verified": 2, "probable": 1}
         for row in self.db.query(
             "SELECT * FROM finding WHERE category=? AND status IN ('verified','probable')", (CATEGORY_UNKNOWN_EXPLANATION,)
         ):
-            out[row["subject_key"]] = self._row(row)
+            prev = out.get(row["subject_key"])
+            if prev is None or rank[row["status"]] > rank[prev["status"]]:
+                out[row["subject_key"]] = self._row(row)
         return out
 
     @staticmethod

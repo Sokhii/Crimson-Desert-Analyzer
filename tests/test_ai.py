@@ -164,13 +164,72 @@ def test_agent_iterative_run_and_knowledge_reuse(scanned, db, app_paths):
     backend = ScriptedBackend(script)
     progress = []
     state = Investigator(db, app_paths, inst, backend, "scripted", progress=lambda p: progress.append(p.steps)).run(tasks)
-    assert state.status == "completed" and state.steps == 4
-    assert db.scalar("SELECT COUNT(*) FROM ai_step") == 4
+    assert state.status == "completed" and state.steps == 4 and state.invalid_replies == 1
+    assert db.scalar("SELECT COUNT(*) FROM ai_step WHERE tool<>'_invalid_reply'") == 4
+    bad = db.query_one("SELECT result_json FROM ai_step WHERE tool='_invalid_reply'")
+    assert bad["result_json"] == "garbage that is not json"  # raw failed reply kept for diagnosis
     assert progress
+    # a probable explanation is linked but does NOT close the unknown
     again = Scanner(db, app_paths).run(root)
+    row = db.query_one("SELECT status, knowledge_uid FROM unknown_structure WHERE signature='hirc_type:v150:0x2A'")
+    assert row["status"] == "open" and row["knowledge_uid"]
+    assert again.stats.ai_findings >= 1
+    # verifying it with a deterministic check closes it on the next scan
+    tools = InvestigationTools(db, app_paths, inst, KnowledgeStore(db, app_paths), "scripted", None)
+    try:
+        data = tools._read("0004/sound/bgm.bnk")
+        needle = (9001).to_bytes(4, "little") + (4001).to_bytes(4, "little")
+        offset = data.index(needle)
+        ok = tools.call("mark_verified", {"uid": row["knowledge_uid"], "check": {
+            "type": "bytes_match", "path": "0004/sound/bgm.bnk", "offset": offset, "hex": needle.hex()}})
+        assert ok["verified"] is True
+    finally:
+        tools.close()
+    Scanner(db, app_paths).run(root)
     row = db.query_one("SELECT status FROM unknown_structure WHERE signature='hirc_type:v150:0x2A'")
     assert row["status"] == "explained"
-    assert again.stats.ai_findings >= 1
+
+
+def test_duplicate_findings_are_merged(tools):
+    a = tools.call("record_finding", {"title": "Unnamed Music Media Structure", "statement": "one", "category": "structure",
+                                      "subject_type": "media", "subject_key": "1", "evidence": ["x"]})
+    b = tools.call("record_finding", {"title": "Unnamed  music media structure!", "statement": "two", "category": "structure",
+                                      "subject_type": "media", "subject_key": "2", "evidence": ["y"]})
+    assert b["recorded"] == a["recorded"] and "merged" in b
+    c = tools.call("record_hypothesis", {"title": "t1", "statement": "s", "subject_type": "object", "subject_key": "4001"})
+    d = tools.call("record_hypothesis", {"title": "different title", "statement": "s2", "subject_type": "object",
+                                         "subject_key": "4001", "evidence": ["more"]})
+    assert c["recorded"] == d["recorded"]
+    assert len(tools.knowledge.get(d["recorded"])["evidence"]) >= 1
+    assert tools.db.scalar("SELECT COUNT(*) FROM finding") == 2
+
+
+def test_build_tasks_music_first(scanned, db):
+    result, _info, _root = scanned
+    tasks = build_tasks(db, result.installation_id)
+    kinds = [t.kind for t in tasks]
+    assert "bank_name" not in kinds and "music_context" not in kinds
+    assert kinds.index("music_switch") < kinds.index("unknown_structure")
+    events = [t for t in tasks if t.kind == "music_events"]
+    assert events and "60970509" in events[0].prompt  # Play_BGM_World targets the music switch
+    switch = [t for t in tasks if t.kind == "music_switch"][0]
+    assert "state group" in switch.prompt
+
+
+def test_twin_music_banks_get_a_task(db, app_paths, fake_game):
+    from cstudio.testing.builders import write_package
+
+    root, _ = fake_game
+    from cstudio.formats.paz import ArchiveReader, parse_pamt
+
+    index = parse_pamt(root / "0004" / "0.pamt")
+    entry = [e for e in index.entries if e.path == "sound/bgm.bnk"][0]
+    with ArchiveReader() as reader:
+        bgm = reader.read(entry)
+    write_package(root / "0007", {"sound/bgm_copy.bnk": bgm})
+    res = Scanner(db, app_paths).run(root)
+    twins = [t for t in build_tasks(db, res.installation_id) if t.kind == "music_bank_twins"]
+    assert twins and "bgm_copy.bnk" in twins[0].prompt
 
 
 def test_agent_stop_and_pause(scanned, db, app_paths):

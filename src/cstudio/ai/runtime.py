@@ -77,6 +77,7 @@ class OpenAICompatibleBackend(InferenceBackend):
         self.model_name = model_name
         self.timeout = timeout
         self.schema_supported = True
+        self.last_reply_info: Dict[str, Any] = {}
 
     def start(self) -> None:
         if not self.is_ready():
@@ -100,6 +101,9 @@ class OpenAICompatibleBackend(InferenceBackend):
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
+            # Hybrid "thinking" models (e.g. Qwen3) otherwise spend the reply budget on hidden reasoning and the
+            # JSON answer gets cut off. Templates without this switch ignore it.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         if json_schema is not None and self.schema_supported:
             payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "action", "schema": json_schema, "strict": True}}
@@ -117,8 +121,13 @@ class OpenAICompatibleBackend(InferenceBackend):
         except (KeyError, IndexError, TypeError) as exc:
             raise BackendError(f"unexpected reply: {str(reply)[:300]}") from exc
         content = message.get("content") or ""
-        if not content.strip() and message.get("reasoning_content"):
-            content = message["reasoning_content"]
+        # Reasoning text is never used as the answer; it is kept only for diagnosing failed replies.
+        self.last_reply_info = {
+            "finish_reason": reply["choices"][0].get("finish_reason"),
+            "reasoning_chars": len(message.get("reasoning_content") or ""),
+            "reasoning_tail": (message.get("reasoning_content") or "")[-300:],
+            "content_chars": len(content),
+        }
         return content
 
     def describe(self) -> Dict[str, Any]:
