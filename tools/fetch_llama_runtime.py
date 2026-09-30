@@ -6,7 +6,8 @@ licensed; its licence is copied next to the binaries.
 
     python tools/fetch_llama_runtime.py --dest dist/CrimsonSoundtrackStudio/runtime/llama [--tag b11284] [--flavor vulkan]
 
-``--tag latest`` (default) resolves the newest release. The resolved tag is
+The default tag is pinned (``DEFAULT_TAG``); ``--tag latest`` picks the newest release that carries
+a matching Windows asset. The resolved tag is
 recorded in ``runtime/llama/RUNTIME_INFO.json``.
 """
 
@@ -24,10 +25,11 @@ import zipfile
 from pathlib import Path
 
 API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
+DEFAULT_TAG = "b11284"  # pinned for reproducible builds; pass --tag latest to pick the newest binary release
 FLAVORS = {
     "vulkan": r"bin-win-vulkan-x64\.zip$",   # AMD, NVIDIA and Intel GPUs via Vulkan; CPU fallback included
     "cpu": r"bin-win-cpu-x64\.zip$",
-    "hip": r"bin-win-hip[^/]*-x64\.zip$",
+    "rocm": r"bin-win-(rocm|hip)[^/]*-x64\.zip$",
 }
 
 
@@ -43,15 +45,27 @@ def _get(url: str) -> bytes:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dest", required=True)
-    parser.add_argument("--tag", default=os.environ.get("LLAMA_CPP_TAG", "latest"))
+    parser.add_argument("--tag", default=os.environ.get("LLAMA_CPP_TAG") or DEFAULT_TAG)
     parser.add_argument("--flavor", default="vulkan", choices=sorted(FLAVORS))
     args = parser.parse_args()
-    release = json.loads(_get(f"{API}/latest" if args.tag == "latest" else f"{API}/tags/{args.tag}"))
     pattern = re.compile(FLAVORS[args.flavor])
-    assets = [a for a in release.get("assets", []) if pattern.search(a["name"])]
-    if not assets:
-        names = [a["name"] for a in release.get("assets", [])]
-        print(f"no {args.flavor} asset in release {release.get('tag_name')}: {names}", file=sys.stderr)
+    if args.tag == "latest":
+        # The release marked "latest" is not always a binary build (e.g. a tag holding only
+        # nightly-tag.txt), so walk recent releases for the newest one carrying the asset.
+        candidates = json.loads(_get(f"{API}?per_page=40"))
+    else:
+        candidates = [json.loads(_get(f"{API}/tags/{args.tag}"))]
+    release, assets = None, []
+    for candidate in candidates:
+        if candidate.get("draft"):
+            continue
+        assets = [a for a in candidate.get("assets", []) if pattern.search(a["name"])]
+        if assets:
+            release = candidate
+            break
+    if release is None:
+        seen = [(c.get("tag_name"), [a["name"] for a in c.get("assets", [])][:5]) for c in candidates[:5]]
+        print(f"no {args.flavor} Windows asset found for tag {args.tag!r}; checked: {seen}", file=sys.stderr)
         return 1
     asset = sorted(assets, key=lambda a: len(a["name"]))[0]
     print(f"llama.cpp {release['tag_name']}: downloading {asset['name']} ({asset['size'] / 1e6:.1f} MB)")

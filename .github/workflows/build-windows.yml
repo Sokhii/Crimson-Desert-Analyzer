@@ -10,13 +10,13 @@ on:
       llama_cpp_tag:
         description: "llama.cpp release tag to bundle (e.g. b11284) or 'latest'"
         required: false
-        default: "latest"
+        default: "b11284"
 
 permissions:
   contents: write
 
 env:
-  LLAMA_CPP_TAG: ${{ github.event.inputs.llama_cpp_tag || 'latest' }}
+  LLAMA_CPP_TAG: ${{ github.event.inputs.llama_cpp_tag || 'b11284' }}
 
 jobs:
   build:
