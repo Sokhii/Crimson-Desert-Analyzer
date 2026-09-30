@@ -70,4 +70,6 @@ def test_print_paths_from_other_cwd(tmp_path):
     out = subprocess.run([sys.executable, "-m", "cstudio", "--print-paths"], cwd=str(tmp_path), env=env,
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
-    assert str((tmp_path / "home").resolve()) in out.stdout
+    import json
+
+    assert Path(json.loads(out.stdout)["root"]) == (tmp_path / "home").resolve()
