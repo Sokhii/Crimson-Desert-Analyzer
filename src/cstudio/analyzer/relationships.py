@@ -109,6 +109,13 @@ def resolve(db: Database, inst_id: int) -> int:
         all_media.add(r[0])
     bank_ids = {r["asset_id"]: r["bank_id"] for r in db.query(
         "SELECT b.asset_id, b.bank_id FROM bnk b JOIN asset a ON a.id=b.asset_id WHERE a.installation_id=?", (inst_id,))}
+    embedded_in: Dict[int, Set[int]] = defaultdict(set)
+    for r in db.query(
+        "SELECT w.source_id, w.bank_asset_id FROM wem w JOIN asset a ON a.id=w.asset_id"
+        " WHERE a.installation_id=? AND w.container='embedded'", (inst_id,),
+    ):
+        if r["bank_asset_id"] in bank_ids:
+            embedded_in[r["source_id"]].add(bank_ids[r["bank_asset_id"]])
     rows = []
     for media in sorted(all_media):
         owners = sorted(g.owners_of.get(media, ()))
@@ -117,8 +124,11 @@ def resolve(db: Database, inst_id: int) -> int:
             for anc in g.ancestors(owner):
                 if anc not in containers:
                     containers.append(anc)
-        banks: Set[int] = set()
-        for obj in owners + containers:
+        # Banks that actually hold this media: those containing an owning Sound/MusicTrack, or
+        # embedding the WEM. Ancestor containers are NOT used: shared parent mixers are duplicated
+        # into hundreds of banks and would attach unrelated bank names to every sound.
+        banks: Set[int] = set(embedded_in.get(media, ()))
+        for obj in owners:
             for asset_id in g.banks_of.get(obj, ()):
                 if asset_id in bank_ids:
                     banks.add(bank_ids[asset_id])

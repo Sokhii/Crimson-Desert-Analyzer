@@ -158,3 +158,21 @@ def test_cancel(db, app_paths, fake_game):
     cancel.set()
     res = Scanner(db, app_paths, cancel=cancel).run(root)
     assert res.status == "cancelled"
+
+
+def test_media_banks_ignore_banks_that_only_share_ancestors(tmp_path, db, app_paths, fake_game):
+    """A parent container duplicated into another bank must not attach that bank to the media."""
+    from cstudio.testing.builders import BankBuilder, write_package
+
+    root, _ = fake_game
+    other = BankBuilder("unrelated_bank")
+    other.actor_mixer(4001, [])  # copy of the world music switch id, as Wwise duplicates parents across banks
+    other.actor_mixer(3001, [])
+    write_package(root / "0006", {"sound/unrelated_bank.bnk": other.build()})
+    res = Scanner(db, app_paths).run(root)
+    rec = queries.media_record(db, res.installation_id, 433831842)
+    assert [b["name"] for b in rec["banks"]] == ["bgm"]
+    stinger = queries.media_record(db, res.installation_id, 558103)
+    assert [b["name"] for b in stinger["banks"]] == ["bgm"]  # embedded media keeps its bank
+    rel = (res.report_dir / "relationships.json").read_text(encoding="utf-8")
+    assert "\n" not in rel.strip()  # compact output

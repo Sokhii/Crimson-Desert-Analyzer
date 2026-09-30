@@ -24,8 +24,12 @@ SCHEMA_ID = "crimson-soundtrack-studio/analysis"
 SCHEMA_VERSION = 1
 
 
-def _write(path: Path, payload: Any) -> None:
-    path.write_text(json.dumps(payload, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
+def _write(path: Path, payload: Any, compact: bool = False) -> None:
+    if compact:  # large machine-only files: no indentation (a real install has millions of edges)
+        text = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
+    else:
+        text = json.dumps(payload, indent=1, ensure_ascii=False, default=str)
+    path.write_text(text, encoding="utf-8")
 
 
 def _envelope(kind: str, inst: dict, scan_id: int, data: Any) -> Dict[str, Any]:
@@ -72,7 +76,7 @@ def write_all(db: Database, paths: AppPaths, inst_id: int, scan_id: int, stats: 
         "edge_format": ["from", "to", "kind", "confidence", "bank_id"],
         "edges": [[e["from"], e["to"], e["kind"], e["confidence"], e["bank_id"]] for e in edges],
         "media_context": contexts,
-    }))
+    }), compact=True)
     _write(out / "findings.json", _envelope("findings", inst, scan_id, findings))
     _write(out / "unknown_structures.json", _envelope("unknown_structures", inst, scan_id, unknown))
     (out / "report.html").write_text(_html(inst, scan_id, stats, overview, music, banks, unknown, findings), encoding="utf-8")
