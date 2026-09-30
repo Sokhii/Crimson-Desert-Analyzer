@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_scan(), "Scan")
         self.tabs.addTab(self._build_results(), "Results")
         self.tabs.addTab(self._build_ai(), "AI Investigation")
+        self.tabs.addTab(self._build_debug(), "Debug")
         self.statusBar().showMessage(f"Data folder: {studio.paths.root}")
         self._load_settings_into_ui()
         self.refresh_results()
@@ -769,6 +770,73 @@ class MainWindow(QMainWindow):
         self.ai_pause_btn.setEnabled(False)
         self.ai_pause_btn.setText("Pause")
         self.ai_stop_btn.setEnabled(False)
+
+    # ============================================================== DEBUG
+    def _build_debug(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        box = QGroupBox("Export a game file")
+        box_layout = QVBoxLayout(box)
+        note = QLabel("Copies one file out of the game's archives (decrypted and decompressed, exactly as the analyzer"
+                      " reads it) into output/exports/ in the application folder. The game installation is only read.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9d948a")
+        box_layout.addWidget(note)
+        row = QHBoxLayout()
+        self.debug_search = QLineEdit()
+        self.debug_search.setPlaceholderText("Search archive paths, e.g. 412724365.bnk or sound/windows/*.bnk")
+        self.debug_search.returnPressed.connect(self._debug_search)
+        search_btn = QPushButton("Search")
+        search_btn.clicked.connect(self._debug_search)
+        row.addWidget(self.debug_search)
+        row.addWidget(search_btn)
+        box_layout.addLayout(row)
+        self.debug_table = _make_table()
+        self.debug_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.debug_table.doubleClicked.connect(lambda _i: self._debug_export())
+        box_layout.addWidget(self.debug_table)
+        buttons = QHBoxLayout()
+        export_btn = QPushButton("Export selected")
+        export_btn.setObjectName("primary")
+        export_btn.clicked.connect(self._debug_export)
+        open_btn = QPushButton("Open exports folder")
+        open_btn.clicked.connect(lambda: self._open_folder(self.studio.paths.output / "exports"))
+        logs_btn = QPushButton("Open logs folder")
+        logs_btn.clicked.connect(lambda: self._open_folder(self.studio.paths.logs))
+        for w in (export_btn, open_btn, logs_btn):
+            buttons.addWidget(w)
+        buttons.addStretch()
+        box_layout.addLayout(buttons)
+        self.debug_status = QPlainTextEdit(readOnly=True)
+        self.debug_status.setFont(_mono())
+        self.debug_status.setMaximumHeight(140)
+        box_layout.addWidget(self.debug_status)
+        layout.addWidget(box)
+        return page
+
+    def _debug_search(self) -> None:
+        pattern = self.debug_search.text().strip()
+        if not pattern:
+            return
+        rows = self.studio.search_installation_files(pattern, 500)
+        _fill_table(self.debug_table, ["Path", "Size", "Stored size", "Compression", "Encryption"],
+                    [[r["path"], r.get("size"), r.get("stored_size"), r.get("compression"), r.get("encryption")] for r in rows],
+                    [r["path"] for r in rows])
+        if not rows:
+            self.debug_status.appendPlainText(f"No files match '{pattern}'" +
+                                              ("" if self.studio.current_installation_id() else " (scan the game first)."))
+
+    def _debug_export(self) -> None:
+        paths = sorted({self.debug_table.item(i.row(), 0).data(Qt.UserRole) for i in self.debug_table.selectedIndexes()})
+        if not paths:
+            self.debug_status.appendPlainText("Select one or more files first.")
+            return
+        for path in paths:
+            try:
+                target = self.studio.export_file(path)
+                self.debug_status.appendPlainText(f"Exported {path} -> {target}")
+            except Exception as exc:  # noqa: BLE001 - shown to the user
+                self.debug_status.appendPlainText(f"Could not export {path}: {exc}")
 
     # =============================================================== misc
     def _start(self, worker: Worker) -> None:

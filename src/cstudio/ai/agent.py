@@ -48,6 +48,9 @@ Rules:
 - Do not classify gameplay context (boss/town/combat...). Focus on what assets exist, how they connect, and evidence.
 - Record only NEW conclusions. Do not record facts the tools already report (types, tempo, container chains).
 - An unknown structure stays open until mark_verified passes; a probable explanation does not close it.
+- Only pass the arguments a tool lists. search_music_assets searches music media only; to find what starts, stops
+  or changes something, use find_actions (by kind, target object or state/switch group).
+- Never repeat an identical call; its result is already in the history.
 - Keep thoughts short. When the task is done (or you are stuck), call finish_task with a summary.
 
 Wwise facts (use them, do not contradict them):
@@ -209,7 +212,8 @@ def build_tasks(db: Database, inst_id: int, limit: int = 60) -> List[Investigati
             " the event, its actions (Play/Stop/SetState...) and the targets (get_container) to describe which music"
             " container each event starts or stops and which state/switch groups the targets depend on. Record one"
             " finding per bank summarising the pattern (category relationship, subject_type bank, subject_key the bank"
-            " id), not one per event.", str(b["bank_id"])))
+            " id), not one per event. find_actions(kind=\"Stop\") and find_actions(target=<id>) find stop actions.",
+            str(b["bank_id"])))
     switches = db.query(
         "SELECT o.object_id, o.fields_json FROM wwise_object o JOIN asset a ON a.id=o.bank_asset_id"
         " WHERE a.installation_id=? AND o.type_code=12 GROUP BY o.object_id ORDER BY length(o.fields_json) DESC LIMIT 12",
@@ -224,7 +228,8 @@ def build_tasks(db: Database, inst_id: int, limit: int = 60) -> List[Investigati
             f"Music switch container {sw['object_id']} (fully decoded by the parser) chooses a child from its decision"
             f" tree ({leaves} leaves) using these arguments: {groups_txt}. Use get_object/get_container to see which"
             " playlists/segments each branch leads to, and find_referencing_objects / find_references on the group ids"
-            " to find the events or SetState/SetSwitch actions that change them. Record what drives the selection"
+            " and find_actions(group=<group id>) to find the SetState/SetSwitch actions that change them (none found"
+            " means the game code sets the group directly). Record what drives the selection"
             " (category relationship, subject_type object, subject_key the container id).", str(sw["object_id"])))
     unknowns = queries.unknown_structures(db, inst_id, "open")
     music_unknowns = [u for u in unknowns if u["signature"].startswith(MUSIC_UNKNOWN_PREFIXES)]
@@ -248,7 +253,7 @@ class Investigator:
     def __init__(self, db: Database, paths: AppPaths, inst_id: int, backend: InferenceBackend, model_id: str,
                  progress: Optional[Callable[[AgentProgress], None]] = None, stop: Optional[threading.Event] = None,
                  pause: Optional[threading.Event] = None, max_steps_per_task: int = 14, max_total_steps: int = 400,
-                 history_window: int = 8, max_reply_tokens: int = 1500) -> None:
+                 history_window: int = 8, max_reply_tokens: int = 1500, max_repeats: int = 3) -> None:
         self.db = db
         self.paths = paths
         self.inst_id = inst_id
@@ -261,6 +266,7 @@ class Investigator:
         self.max_total_steps = max_total_steps
         self.history_window = history_window
         self.max_reply_tokens = max_reply_tokens
+        self.max_repeats = max_repeats
         self.knowledge = KnowledgeStore(db, paths)
         self.state = AgentProgress(model=model_id)
 
@@ -328,6 +334,8 @@ class Investigator:
     def _run_task(self, task: InvestigationTask, tools: InvestigationTools, system: str, schema: dict, session_id: int) -> str:
         history: List[Dict[str, str]] = []
         failures = 0
+        seen_calls: Dict[str, int] = {}  # canonical call -> step it was first made
+        repeats = 0
         for _ in range(self.max_steps_per_task):
             self._wait_if_paused()
             if self.stop.is_set() or self.state.steps >= self.max_total_steps:
@@ -357,7 +365,15 @@ class Investigator:
             self.state.steps += 1
             self.state.last_thought = str(action.get("thought", ""))[:400]
             self.state.last_tool = f"{tool}({json.dumps(args, default=str)[:200]})"
-            result = tools.call(tool, args)
+            call_key = tool + json.dumps(args, sort_keys=True, default=str)
+            if call_key in seen_calls and tool not in ("finish_task", "stop_investigation"):
+                repeats += 1
+                result = {"repeated": True, "note": f"You already made this exact call at step {seen_calls[call_key]} of"
+                          " this task; its result is in the history above. Use a different tool or arguments, or"
+                          " finish_task if you have enough evidence."}
+            else:
+                seen_calls[call_key] = self.state.steps
+                result = tools.call(tool, args)
             text = tools.truncate(result)
             self.state.last_result = text[:400]
             self.db.execute(
@@ -370,6 +386,8 @@ class Investigator:
                 return str(args.get("summary", "finished"))[:300]
             if tool == "stop_investigation":
                 return "STOP"
+            if repeats >= self.max_repeats:
+                return "stopped (kept repeating the same calls)"
             history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:1200]})
             history.append({"role": "user", "content": f"TOOL RESULT ({tool}): {text}"})
         return "step budget used"

@@ -176,3 +176,37 @@ def test_media_banks_ignore_banks_that_only_share_ancestors(tmp_path, db, app_pa
     assert [b["name"] for b in stinger["banks"]] == ["bgm"]  # embedded media keeps its bank
     rel = (res.report_dir / "relationships.json").read_text(encoding="utf-8")
     assert "\n" not in rel.strip()  # compact output
+
+
+def test_export_file_is_read_only_and_inside_output(scanned, db, app_paths):
+    from cstudio.analyzer.export import FileLookupError, export_file
+
+    result, _info, root = scanned
+    before = _tree_snapshot(root)
+    target = export_file(db, app_paths, result.installation_id, "sound/bgm.bnk")
+    assert target.read_bytes()[:4] == b"BKHD"  # decrypted/decompressed bank
+    assert app_paths.is_inside(target) and target.parts[-3:] == ("0004", "sound", "bgm.bnk")
+    xml = export_file(db, app_paths, result.installation_id, "0004/sound/soundbanksinfo.xml")
+    assert b"SoundBanksInfo" in xml.read_bytes()  # encrypted + LZ4 in the archive
+    assert _tree_snapshot(root) == before
+    with pytest.raises(FileLookupError):
+        export_file(db, app_paths, result.installation_id, "loose:../../outside.txt")
+    with pytest.raises(FileLookupError):
+        export_file(db, app_paths, result.installation_id, "sound/nope.bnk")
+
+
+def test_cli_export(tmp_path, fake_game):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root, _ = fake_game
+    repo = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, CSTUDIO_HOME=str(tmp_path / "home"), PYTHONPATH=str(repo / "src"))
+    scan = subprocess.run([sys.executable, "-m", "cstudio", "--scan", str(root)], env=env, capture_output=True, text=True, timeout=120)
+    assert scan.returncode == 0, scan.stderr
+    out = subprocess.run([sys.executable, "-m", "cstudio", "--export", "sound/bgm.bnk"], env=env, capture_output=True,
+                         text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert (tmp_path / "home" / "output" / "exports" / "0004" / "sound" / "bgm.bnk").is_file()

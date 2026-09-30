@@ -42,6 +42,7 @@ pip install -r requirements-dev.txt
 python CrimsonSoundtrackStudio.py                  # GUI (data goes to ./dev_home)
 python CrimsonSoundtrackStudio.py --scan "D:\SteamLibrary\steamapps\common\Crimson Desert"
 python CrimsonSoundtrackStudio.py --selftest       # end-to-end check on a synthetic install
+python CrimsonSoundtrackStudio.py --export sound/windows/412724365.bnk   # copy one game file to output/exports/
 python -m pytest -q                                # test suite (no game files needed)
 ```
 

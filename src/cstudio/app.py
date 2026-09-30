@@ -78,6 +78,8 @@ def main(argv=None) -> int:
     parser.add_argument("--scan", metavar="GAME_DIR", help="analyze an installation without the GUI")
     parser.add_argument("--import-csv", metavar="CSV", help="import a community research CSV")
     parser.add_argument("--selftest", action="store_true", help="run the built-in end-to-end self test")
+    parser.add_argument("--export", metavar="PATH", action="append",
+                        help="copy one scanned game file (e.g. sound/windows/412724365.bnk) to output/exports/")
     parser.add_argument("--print-paths", action="store_true", help="show the portable data folders")
     parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args(argv)
@@ -92,11 +94,21 @@ def main(argv=None) -> int:
     if args.print_paths:
         print(json.dumps({"root": str(paths.root), "dirs": [str(d) for d in paths.all_dirs()]}, indent=2))
         return 0
-    if problem and (args.scan or args.selftest or args.import_csv):
+    if problem and (args.scan or args.selftest or args.import_csv or args.export):
         print(problem, file=sys.stderr)
         return 2
     if args.selftest:
         return _selftest(paths)
+    if args.export:
+        from .services import Studio
+
+        studio = Studio(paths)
+        try:
+            for item in args.export:
+                print(f"exported {item} -> {studio.export_file(item)}")
+        finally:
+            studio.close()
+        return 0
     if args.import_csv:
         from .services import Studio
 

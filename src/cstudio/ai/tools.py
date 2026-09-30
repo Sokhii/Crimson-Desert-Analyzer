@@ -20,13 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from cstudio.analyzer import queries
+from cstudio.analyzer import export, queries
 from cstudio.analyzer.relationships import object_neighbourhood
 from cstudio.app_paths import AppPaths
 from cstudio.db.database import Database, loads
 from cstudio.formats import bnk as bnkfmt
 from cstudio.formats.hashing import wwise_fnv1_32
-from cstudio.formats.paz import ArchiveReader, PamtEntry
+from cstudio.formats.paz import ArchiveReader
 from cstudio.formats.wem import parse_wem
 from cstudio.knowledge.store import CATEGORY_NAME_MAPPING, KnowledgeStore
 
@@ -128,6 +128,11 @@ class InvestigationTools:
           {"id": "numeric id"}, self.find_references)
         a("find_referencing_objects", "Objects whose parsed/heuristic references point at this id.",
           {"id": "numeric id"}, self.find_referencing_objects)
+        a("find_actions", "Find Wwise actions by kind and what they act on, with the events that contain them. Use it to"
+          " answer 'what starts/stops this?' or 'what sets this state/switch group?'.",
+          {"kind": "optional action kind substring, e.g. Play, Stop, SetState, SetSwitch, Pause",
+           "target": "optional object id the action targets", "group": "optional state/switch group id it sets",
+           "limit": "default 30"}, self.find_actions)
         a("search_music_assets", "Search classified media (music/likely/possible) by name, id, bank or event.",
           {"query": "text", "limit": "default 20"}, self.search_music_assets)
         a("get_unknown_structures", "List unresolved structures found by the scanner.",
@@ -169,15 +174,22 @@ class InvestigationTools:
         args = args if isinstance(args, dict) else {}
         allowed = set(spec.params)
         clean = {k: v for k, v in args.items() if k in allowed}
+        ignored = sorted(k for k in args if k not in allowed)
         try:
             result = spec.fn(**clean)
         except ToolError as exc:
-            return {"error": str(exc)}
+            result = {"error": str(exc)}
         except TypeError as exc:
-            return {"error": f"bad arguments for {name}: {exc}"}
+            result = {"error": f"bad arguments for {name}: {exc}"}
         except Exception as exc:  # noqa: BLE001 - tool failures are reported to the model, not raised
-            return {"error": f"{type(exc).__name__}: {exc}"}
-        return result if isinstance(result, dict) else {"result": result}
+            result = {"error": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(result, dict):
+            result = {"result": result}
+        if ignored:
+            # tell the model its invented options did nothing, instead of letting it retry them
+            result = {"ignored_args": ignored, "note": f"{name} does not accept {', '.join(ignored)}; accepted: "
+                      f"{', '.join(spec.params) or 'no arguments'}", **result}
+        return result
 
     @staticmethod
     def truncate(result: Dict[str, Any], limit: int = MAX_RESULT_CHARS) -> str:
@@ -199,41 +211,10 @@ class InvestigationTools:
     def _resolve(self, path: str):
         """Resolve a path to (kind, entry_or_path). Only installation files are reachable."""
 
-        path = str(path).strip().replace("\\", "/")
-        if path.startswith("loose:"):
-            rel = path[6:]
-            return "loose", self._loose(rel)
-        if path.startswith("archive:"):
-            path = path[8:]
-        package, _, vpath = path.partition("/")
-        row = self.db.query_one(
-            "SELECT * FROM archive_entry WHERE installation_id=? AND package=? AND vpath=?", (self.inst_id, package, vpath))
-        if row is None:
-            row = self.db.query_one("SELECT * FROM archive_entry WHERE installation_id=? AND vpath=? LIMIT 1", (self.inst_id, path))
-        if row is None:
-            if self.root and (self.root / path).is_file():
-                return "loose", self._loose(path)
-            raise ToolError(f"no file '{path}' in the scanned installation (use search_files)")
-        pamt = self.db.query_one("SELECT rel_path FROM source_file WHERE installation_id=? AND kind='pamt' AND rel_path LIKE ?",
-                                 (self.inst_id, f"{row['package']}/%.pamt"))
-        if pamt is None or self.root is None:
-            raise ToolError("archive index for this file is no longer present")
-        base = self.root / Path(pamt["rel_path"]).parent
-        entry = PamtEntry(row["vpath"], row["package"], str(self.root / pamt["rel_path"]), str(base / f"{row['paz_index']}.paz"),
-                          row["paz_index"], row["offset"], row["comp_size"], row["orig_size"], row["flags"])
-        return "archive", entry
-
-    def _loose(self, rel: str) -> Path:
-        if self.root is None:
-            raise ToolError("no installation")
-        target = (self.root / rel).resolve()
         try:
-            target.relative_to(self.root.resolve())
-        except ValueError as exc:
-            raise ToolError("path escapes the installation folder") from exc
-        if not target.is_file():
-            raise ToolError(f"no such file {rel}")
-        return target
+            return export.resolve(self.db, self.inst_id, path)
+        except export.FileLookupError as exc:
+            raise ToolError(f"{exc} (use search_files)") from exc
 
     def _read(self, path: str, limit: Optional[int] = None) -> bytes:
         kind, ref = self._resolve(path)
@@ -429,6 +410,39 @@ class InvestigationTools:
 
     def find_referencing_objects(self, id):  # noqa: A002
         return {"referencing": queries.find_referencing(self.db, self.inst_id, self._int(id))}
+
+    def find_actions(self, kind: str = "", target=None, group=None, limit: int = 30):
+        target_id = self._int(target, "target") if target not in (None, "") else None
+        group_id = self._int(group, "group") if group not in (None, "") else None
+        kind_l = str(kind or "").lower()
+        rows = self.db.query(
+            "SELECT o.object_id, o.fields_json, a.vpath FROM wwise_object o JOIN asset a ON a.id=o.bank_asset_id"
+            " WHERE a.installation_id=? AND o.type_code=3", (self.inst_id,))
+        matches = []
+        for r in rows:
+            fields = loads(r["fields_json"], {}) or {}
+            name = str(fields.get("action_name", ""))
+            if kind_l and kind_l not in name.lower():
+                continue
+            if target_id is not None and fields.get("target_id") != target_id:
+                continue
+            if group_id is not None and group_id not in (fields.get("state_group_id"), fields.get("switch_group_id")):
+                continue
+            matches.append((r, fields, name))
+        out = []
+        for r, fields, name in matches[: min(int(limit or 30), 100)]:
+            events = [e["from_object_id"] for e in self.db.query(
+                "SELECT DISTINCT from_object_id FROM object_ref WHERE kind='event_action' AND to_id=?", (r["object_id"],))]
+            item = {"action_id": r["object_id"], "kind": name, "bank": r["vpath"], "events": events[:10]}
+            for key in ("target_id", "state_group_id", "state_id", "switch_group_id", "switch_id", "props"):
+                if key in fields:
+                    item[key] = fields[key]
+            out.append(item)
+        by_kind: Dict[str, int] = {}
+        for _r, _f, name in matches:
+            by_kind[name] = by_kind.get(name, 0) + 1
+        return {"total": len(matches), "by_kind": by_kind, "actions": out,
+                "note": None if matches else "no action in any scanned bank matches; the game code may do this directly"}
 
     def search_music_assets(self, query: str = "", limit: int = 20):
         rows = queries.media_summary_rows(self.db, self.inst_id, str(query or ""), role="music*", limit=min(int(limit or 20), 100))

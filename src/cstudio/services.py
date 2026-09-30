@@ -79,6 +79,24 @@ class Studio:
         finally:
             db.close()
 
+    def search_installation_files(self, pattern: str, limit: int = 500):
+        inst = self.current_installation_id()
+        if inst is None:
+            return []
+        from .analyzer import queries
+
+        return queries.search_files(self.db, inst, pattern, limit)
+
+    def export_file(self, path: str) -> Path:
+        """Copy one installation file (decrypted/decompressed) to output/exports/. Read-only on the game."""
+
+        inst = self.current_installation_id()
+        if inst is None:
+            raise RuntimeError("scan the game first so the app knows where each file is stored")
+        from .analyzer.export import export_file
+
+        return export_file(self.db, self.paths, inst, path)
+
     def import_community_csv(self, csv_path: str) -> Dict[str, object]:
         return community.import_csv(self.db, Path(csv_path))
 

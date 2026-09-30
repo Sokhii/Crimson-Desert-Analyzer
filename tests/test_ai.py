@@ -375,3 +375,34 @@ def test_old_catalog_copy_is_upgraded(app_paths):
     assert (app_paths.config / "model_catalog.v1.bak.json").is_file()
     ensure_default_config(app_paths)  # idempotent once current
     assert not (app_paths.config / "model_catalog.v2.bak.json").exists()
+
+
+def test_ignored_args_are_reported(tools):
+    out = tools.call("inspect_bnk", {"bank": "bgm", "header_only": True, "chunk": "BKHD"})
+    assert out["ignored_args"] == ["chunk", "header_only"] and "accepted: bank" in out["note"]
+    assert out["version"] == 150  # the call itself still ran
+
+
+def test_find_actions(tools):
+    plays = tools.call("find_actions", {"kind": "Play"})
+    assert plays["total"] >= 2 and plays["by_kind"].get("Play")
+    world = tools.call("find_actions", {"target": 4001})
+    assert world["actions"][0]["events"] == [60970509]  # Play_BGM_World
+    from cstudio.formats.hashing import wwise_fnv1_32
+
+    sets = tools.call("find_actions", {"group": wwise_fnv1_32("BGM_Region")})
+    assert sets["actions"][0]["kind"] == "SetState" and sets["actions"][0]["state_id"] == wwise_fnv1_32("Desert")
+    none = tools.call("find_actions", {"group": 12345})
+    assert none["total"] == 0 and "game code" in none["note"]
+
+
+def test_agent_stops_repeating_itself(scanned, db, app_paths):
+    result, _info, _root = scanned
+    same = J("find_references", {"id": 4001})
+    tasks = [t for t in build_tasks(db, result.installation_id) if t.kind == "music_switch"][:1]
+    backend = ScriptedBackend([same] * 10)
+    state = Investigator(db, app_paths, result.installation_id, backend, "s", max_steps_per_task=10).run(tasks)
+    steps = db.query("SELECT tool, result_json FROM ai_step WHERE session_id=? ORDER BY id", (state.session_id,))
+    assert len(steps) == 4  # 1 real call + 3 refused repeats, then the task is stopped
+    assert '"repeated": true' in steps[1]["result_json"]
+    assert "repeating" in db.scalar("SELECT summary FROM ai_session WHERE id=?", (state.session_id,))

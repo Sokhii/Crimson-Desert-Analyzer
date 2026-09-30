@@ -38,4 +38,12 @@ def test_main_window_scan_flow(qapp, app_paths, fake_game):
     assert window.media_table.rowCount() == len(info["music_wems"])
     window.media_table.selectRow(0)
     assert "source_id" in window.media_detail.toPlainText()
+    # Debug tab: search and export a file
+    window.debug_search.setText("bgm.bnk")
+    window._debug_search()
+    assert window.debug_table.rowCount() == 1
+    window.debug_table.selectRow(0)
+    window._debug_export()
+    assert "Exported" in window.debug_status.toPlainText()
+    assert (app_paths.output / "exports" / "0004" / "sound" / "bgm.bnk").is_file()
     window.close()
