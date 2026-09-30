@@ -1,0 +1,24 @@
+[project]
+name = "crimson-soundtrack-studio"
+version = "0.1.0"
+description = "Crimson Desert audio analyzer with a local AI reverse-engineering investigator"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = ["PySide6-Essentials>=6.7,<7", "cryptography>=42", "lz4>=4.3", "certifi>=2024.2.2"]
+
+[project.scripts]
+crimson-soundtrack-studio = "cstudio.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cstudio = ["resources/*.json", "resources/research/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["game: requires a real Crimson Desert installation (set CRIMSON_DESERT_DIR)"]

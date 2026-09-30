@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+# Local portable home used when running from source
+dev_home/
+# Never commit model weights, runtimes or game data
+*.gguf
+runtime/
+models/
+*.paz
+*.pamt
+*.bnk
+*.wem
+!tests/fixtures/**

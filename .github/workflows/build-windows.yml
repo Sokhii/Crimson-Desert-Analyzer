@@ -1,0 +1,72 @@
+name: windows-portable
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      llama_cpp_tag:
+        description: "llama.cpp release tag to bundle (e.g. b11284) or 'latest'"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: write
+
+env:
+  LLAMA_CPP_TAG: ${{ github.event.inputs.llama_cpp_tag || 'latest' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Build application folder (PyInstaller, one-folder)
+        run: pyinstaller packaging/CrimsonSoundtrackStudio.spec --noconfirm --clean
+      - name: Bundle llama.cpp runtime (Vulkan build, CPU fallback included)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/fetch_llama_runtime.py --dest dist/CrimsonSoundtrackStudio/runtime/llama --flavor vulkan
+      - name: Check runtime starts
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & dist/CrimsonSoundtrackStudio/runtime/llama/llama-server.exe --version
+          exit 0
+      - name: Self test of the frozen EXE from a moved copy
+        shell: pwsh
+        run: |
+          $copy = Join-Path $env:RUNNER_TEMP "moved\Crimson Soundtrack Studio"
+          New-Item -ItemType Directory -Force -Path (Split-Path $copy) | Out-Null
+          Copy-Item -Recurse dist/CrimsonSoundtrackStudio $copy
+          Push-Location $env:RUNNER_TEMP
+          $p = Start-Process -FilePath (Join-Path $copy "CrimsonSoundtrackStudio.exe") -ArgumentList "--selftest" -Wait -PassThru
+          Pop-Location
+          Get-Content (Join-Path $copy "logs\selftest.json")
+          if ($p.ExitCode -ne 0) { throw "self test failed with exit code $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $copy "data\database\studio.sqlite3"))) { throw "database was not created beside the EXE" }
+      - name: Package portable ZIP
+        run: python tools/build_portable.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrimsonSoundtrackStudio-windows-portable
+          path: dist/CrimsonSoundtrackStudio-*-windows-portable.zip
+          if-no-files-found: error
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CrimsonSoundtrackStudio-*-windows-portable.zip

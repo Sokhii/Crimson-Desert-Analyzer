@@ -1,0 +1,5 @@
+# Runtime dependencies (bundled into the portable build; users install nothing)
+PySide6-Essentials>=6.7,<7
+cryptography>=42
+lz4>=4.3
+certifi>=2024.2.2
